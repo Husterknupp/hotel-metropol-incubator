@@ -1,0 +1,13 @@
+{
+  "name": "gh-event-listener",
+  "version": "1.0.0",
+  "description": "Polls GitHub for mentions, issue assignments, and PR review requests and triggers the OpenClaw agent accordingly.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  }
+}
