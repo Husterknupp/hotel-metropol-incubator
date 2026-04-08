@@ -1,16 +1,26 @@
 // gh-adapter.js
 // Thin wrapper around the `gh` CLI. Kept intentionally simple —
 // the real complexity lives in index.js, which is where the tests focus.
+//
+// All functions throw on gh CLI errors so callers can log and handle them.
 
 const { execSync } = require("child_process");
 
 function ghJson(args) {
-  const raw = execSync(`gh ${args}`, { encoding: "utf8" });
-  return JSON.parse(raw);
+  try {
+    const raw = execSync(`gh ${args}`, { encoding: "utf8" });
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`gh CLI error (${args.split(" ")[0]}): ${err.message}`);
+  }
 }
 
 function ghExec(args) {
-  execSync(`gh ${args}`, { encoding: "utf8" });
+  try {
+    execSync(`gh ${args}`, { encoding: "utf8" });
+  } catch (err) {
+    throw new Error(`gh CLI error (${args.split(" ")[0]}): ${err.message}`);
+  }
 }
 
 /**
