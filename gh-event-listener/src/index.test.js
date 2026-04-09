@@ -69,12 +69,29 @@ describe("classifyNotification", () => {
     ).toBe("comment");
   });
 
+  test("reason=comment → comment (reply on thread we're already on)", () => {
+    expect(
+      classifyNotification(makeNotification({ reason: "comment" }))
+    ).toBe("comment");
+  });
+
   test("reason=assign + Issue → issue", () => {
     expect(
       classifyNotification(
         makeNotification({
           reason: "assign",
           subject: { type: "Issue", url: "https://api.github.com/repos/X/Y/issues/1" },
+        })
+      )
+    ).toBe("issue");
+  });
+
+  test("reason=assign + PullRequest → issue (type included in message)", () => {
+    expect(
+      classifyNotification(
+        makeNotification({
+          reason: "assign",
+          subject: { type: "PullRequest", url: "https://api.github.com/repos/X/Y/pulls/7" },
         })
       )
     ).toBe("issue");
@@ -92,6 +109,21 @@ describe("classifyNotification", () => {
         })
       )
     ).toBe("pr");
+  });
+
+  test("reason=author + Issue → comment (someone commented on our issue)", () => {
+    expect(
+      classifyNotification(
+        makeNotification({
+          reason: "author",
+          subject: {
+            type: "Issue",
+            url: "https://api.github.com/repos/X/Y/issues/5",
+            latest_comment_url: "https://api.github.com/repos/X/Y/issues/comments/55",
+          },
+        })
+      )
+    ).toBe("comment");
   });
 
   test("reason=author + PullRequest + comment URL → pr_review_comment", () => {
@@ -153,6 +185,25 @@ describe("resolveActor", () => {
     expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
     expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
       "https://api.github.com/repos/X/Y/issues/comments/99"
+    );
+  });
+
+  test("comment: fetches actor from latest_comment_url (thread reply)", () => {
+    const notif = makeNotification({
+      reason: "comment",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/X/Y/issues/5",
+        latest_comment_url: "https://api.github.com/repos/X/Y/issues/comments/88",
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+    });
+
+    expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
+    expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
+      "https://api.github.com/repos/X/Y/issues/comments/88"
     );
   });
 
@@ -261,14 +312,24 @@ describe("buildEventMessage", () => {
     );
   });
 
-  test("issue message includes issue number", () => {
+  test("issue message includes Issue type and number", () => {
     const issueNotif = makeNotification({
       subject: {
         type: "Issue",
         url: "https://api.github.com/repos/X/Y/issues/1",
       },
     });
-    expect(buildEventMessage("issue", issueNotif)).toMatch(/#1/);
+    expect(buildEventMessage("issue", issueNotif)).toMatch(/Issue #1/);
+  });
+
+  test("issue message includes PullRequest type when assigned to a PR", () => {
+    const prAssignNotif = makeNotification({
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/X/Y/pulls/7",
+      },
+    });
+    expect(buildEventMessage("issue", prAssignNotif)).toMatch(/PullRequest #7/);
   });
 
   test("pr message includes PR number", () => {
@@ -355,7 +416,7 @@ describe("run – issue assignment flow (happy path)", () => {
     );
     expect(ghAdapter.addReaction).toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Work on issue #1")
+      expect.stringContaining("Work on Issue #1")
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });

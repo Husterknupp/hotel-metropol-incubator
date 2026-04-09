@@ -8,11 +8,13 @@
 //   WARN_CHANNEL    (optional) Discord channel ID for third-party event warnings.
 //                   If not set, the warning goes to the agent's default channel.
 //
-// Classification (based on notification.reason):
+// Classification (based on notification.reason + subject.type):
 //   1. mention           → comment: someone @-mentioned us
-//   2. assign + Issue    → issue: we were assigned to an issue
-//   3. review_requested  → pr: we were asked to review a PR
-//   4. author + PR       → pr_review_comment: someone commented on our PR
+//   2. comment           → comment: someone replied on a thread we're already on
+//   3. assign            → issue: we were assigned (Issue or PR — type included in message)
+//   4. review_requested  → pr: we were asked to review a PR
+//   5. author + Issue    → comment: someone commented on an issue we created
+//   6. author + PR       → pr_review_comment: someone commented on a PR we created
 
 const gh = require("./gh-adapter");
 const openclaw = require("./openclaw-adapter");
@@ -34,17 +36,17 @@ function log(outcome, detail = "") {
 function classifyNotification(notification) {
   const reason = notification.reason;
   const type = notification.subject?.type;
-  const hasComment = Boolean(notification.subject?.latest_comment_url);
 
   if (DEBUG) {
-    console.debug(`[DEBUG] reason: ${reason} - type: ${type} - hasComment: ${hasComment}`);
+    console.debug(`[DEBUG] reason: ${reason} - type: ${type}`);
   }
 
   if (reason === "mention") return "comment";
-  if (reason === "assign" && type === "Issue") return "issue";
-  if (reason === "review_requested" && type === "PullRequest") return "pr";
-  if (reason === "author" && type === "PullRequest")
-    return "pr_review_comment";
+  if (reason === "comment") return "comment";
+  if (reason === "assign") return "issue";  // works for both Issue and PullRequest
+  if (reason === "review_requested") return "pr";  // only exists for PRs
+  if (reason === "author" && type === "Issue") return "comment";
+  if (reason === "author" && type === "PullRequest") return "pr_review_comment";
   return "unknown";
 }
 
@@ -62,8 +64,8 @@ function resolveActor(notification, ghAdapter) {
   const subjectUrl = notification.subject?.url;
   const reason = notification.reason;
 
-  // For mentions and author notifications, the comment tells us who spoke
-  if (reason === "mention" && commentUrl) {
+  // For mentions and replies on threads we're on: actor is the comment author
+  if ((reason === "mention" || reason === "comment") && commentUrl) {
     return ghAdapter.getActorFromUrl(commentUrl);
   }
 
@@ -110,7 +112,8 @@ function buildEventMessage(kind, notification) {
     return `React to ${TRUSTED_ACTOR}'s GitHub comment (repo ${repoFull})`;
   }
   if (kind === "issue") {
-    return `Work on issue #${number} (repo ${repoFull})`;
+    const type = notification.subject?.type || "Issue";
+    return `Work on ${type} #${number} (repo ${repoFull})`;
   }
   if (kind === "pr") {
     return `Review PR #${number} (repo ${repoFull})`;
