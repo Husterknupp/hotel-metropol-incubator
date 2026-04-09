@@ -21,15 +21,21 @@ function log(outcome, detail = "") {
 }
 
 /**
- * Classify a notification into one of: comment | issue | pr | unknown
+ * Classify a notification into one of: comment | issue | pr | pr_review_comment | unknown
+ *
+ * pr_review_comment: the agent is the PR author and someone left a review comment.
+ * We distinguish this from general "author" activity (e.g. CI runs) by requiring
+ * that latest_comment_url is present — CI notifications do not carry a comment URL.
  */
 function classifyNotification(notification) {
   const reason = notification.reason;
   const type = notification.subject?.type;
+  const hasComment = Boolean(notification.subject?.latest_comment_url);
 
   if (reason === "mention") return "comment";
   if (reason === "assign" && type === "Issue") return "issue";
   if (reason === "review_requested" && type === "PullRequest") return "pr";
+  if (reason === "author" && type === "PullRequest" && hasComment) return "pr_review_comment";
   return "unknown";
 }
 
@@ -56,6 +62,9 @@ function buildEventMessage(kind, notification) {
   }
   if (kind === "pr") {
     return `Review PR #${number} (repo ${repoFull})`;
+  }
+  if (kind === "pr_review_comment") {
+    return `React to a review comment on your PR #${number} (repo ${repoFull}). Do not @-mention anyone — this was triggered automatically.`;
   }
   return null;
 }
@@ -201,6 +210,7 @@ module.exports = {
   acquireLock,
   releaseLock,
 };
+
 
 // Entry point when run directly
 if (require.main === module) {

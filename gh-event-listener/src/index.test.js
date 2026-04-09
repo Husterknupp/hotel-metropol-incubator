@@ -59,6 +59,27 @@ describe("classifyNotification", () => {
     ).toBe("pr");
   });
 
+  test("reason=author + PullRequest + comment URL → pr_review_comment", () => {
+    expect(
+      classifyNotification({
+        reason: "author",
+        subject: {
+          type: "PullRequest",
+          latest_comment_url: "https://api.github.com/repos/owner/repo/pulls/comments/99",
+        },
+      })
+    ).toBe("pr_review_comment");
+  });
+
+  test("reason=author + PullRequest + NO comment URL → unknown (CI activity)", () => {
+    expect(
+      classifyNotification({
+        reason: "author",
+        subject: { type: "PullRequest" }, // no latest_comment_url
+      })
+    ).toBe("unknown");
+  });
+
   test("unknown reason → unknown", () => {
     expect(classifyNotification({ reason: "subscribed", subject: { type: "Issue" } })).toBe("unknown");
   });
@@ -93,6 +114,22 @@ describe("buildEventMessage", () => {
     });
     const msg = buildEventMessage("pr", prNotif);
     expect(msg).toMatch(/Review PR #7/);
+  });
+
+  test("pr_review_comment message includes PR number and no-ping note", () => {
+    const reviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        actor: { login: "Husterknupp" },
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/comments/99",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/2",
+      },
+    });
+    const msg = buildEventMessage("pr_review_comment", reviewNotif);
+    expect(msg).toMatch(/review comment on your PR #2/);
+    expect(msg).toMatch(/Do not @-mention/);
   });
 });
 
@@ -156,6 +193,54 @@ describe("run – PR review request flow (happy path)", () => {
       expect.stringMatching(/Review PR #7/)
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith("notif-1");
+  });
+});
+
+
+describe("run – PR review comment flow (happy path)", () => {
+  test("locks, sends pr_review_comment event, marks thread read", () => {
+    const reviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        actor: { login: "Husterknupp" },
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/comments/55",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/2",
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([reviewNotif]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringMatching(/review comment on your PR #2/)
+    );
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith("notif-1");
+  });
+
+  test("CI activity on own PR (no comment URL) is treated as no_op", () => {
+    const ciNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        actor: { login: "Husterknupp" },
+        // No latest_comment_url — this is a CI run, not a review comment
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/2",
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([ciNotif]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
   });
 });
 
