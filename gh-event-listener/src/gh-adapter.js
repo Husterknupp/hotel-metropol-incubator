@@ -4,9 +4,15 @@
 
 const { execSync } = require("child_process");
 
+const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+
 function ghJson(args) {
   try {
-    const raw = execSync(`gh ${args}`, { encoding: "utf8" });
+    const command = `gh ${args}`;
+    const raw = execSync(command, { encoding: "utf8" });
+    if (DEBUG) {
+	console.debug(`[DEBUG]: command '${command}'\n[DEBUG]: yielded ${raw}`);
+    }
     return JSON.parse(raw);
   } catch (err) {
     throw new Error(`gh CLI error (${args.split(" ")[0]}): ${err.message}`);
@@ -15,7 +21,11 @@ function ghJson(args) {
 
 function ghExec(args) {
   try {
-    execSync(`gh ${args}`, { encoding: "utf8" });
+    const command = `gh ${args}`;
+    execSync(command, { encoding: "utf8" });
+    if (DEBUG) {
+        console.debug(`[DEBUG]: command '${command}' (answer not relevant for script)`);
+    }
   } catch (err) {
     throw new Error(`gh CLI error (${args.split(" ")[0]}): ${err.message}`);
   }
@@ -65,6 +75,10 @@ function removeReaction({ owner, repo, commentId, reactionId }) {
  * Marks a notification thread as read.
  */
 function markThreadRead(threadId) {
+  if (DEBUG) {
+	console.debug(`[DEBUG]: skipping markThreadRead for thread ${threadId} (DEBUG mode)`);
+	return;
+  }
   ghExec(`api notifications/threads/${threadId} -X PATCH`);
 }
 

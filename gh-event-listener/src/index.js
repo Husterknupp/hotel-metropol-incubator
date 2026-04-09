@@ -21,6 +21,8 @@ const TRUSTED_ACTOR = process.env.TRUSTED_ACTOR || "Husterknupp";
 const LOCK_REACTION = process.env.LOCK_REACTION || "eyes";
 const WARN_CHANNEL = process.env.WARN_CHANNEL || null;
 
+const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+
 function log(outcome, detail = "") {
   const ts = new Date().toISOString();
   console.log(JSON.stringify({ ts, outcome, detail }));
@@ -33,6 +35,10 @@ function classifyNotification(notification) {
   const reason = notification.reason;
   const type = notification.subject?.type;
   const hasComment = Boolean(notification.subject?.latest_comment_url);
+
+  if (DEBUG) {
+    console.debug(`[DEBUG] reason: ${reason} - type: ${type} - hasComment: ${hasComment}`);
+  }
 
   if (reason === "mention") return "comment";
   if (reason === "assign" && type === "Issue") return "issue";
@@ -173,6 +179,10 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
 
   for (const notification of notifications) {
     const kind = classifyNotification(notification);
+
+    if (DEBUG) {
+	console.debug(`[DEBUG]: notification ${notification.id} classified as ${kind}`)
+    }
 
     if (kind === "unknown") {
       log(
