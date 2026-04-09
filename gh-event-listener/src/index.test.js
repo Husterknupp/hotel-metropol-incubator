@@ -42,6 +42,13 @@ function makeGhAdapter(overrides = {}) {
     removeReaction: jest.fn(),
     markThreadRead: jest.fn(),
     getReactions: jest.fn().mockReturnValue([]),
+    getLatestPrReviewComment: jest.fn().mockReturnValue({
+      id: 9001,
+      user: { login: "Husterknupp" },
+    }),
+    addPrReviewCommentReaction: jest.fn(),
+    removePrReviewCommentReaction: jest.fn(),
+    getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
     ...overrides,
   };
 }
@@ -103,7 +110,7 @@ describe("classifyNotification", () => {
     ).toBe("pr_review_comment");
   });
 
-  test("reason=author + PullRequest + NO comment URL → unknown (CI activity)", () => {
+  test("reason=author + PullRequest + NO comment URL → pr_review_comment (inline diff comment)", () => {
     expect(
       classifyNotification(
         makeNotification({
@@ -115,7 +122,7 @@ describe("classifyNotification", () => {
           },
         })
       )
-    ).toBe("unknown");
+    ).toBe("pr_review_comment");
   });
 
   test("reason=ci_activity → unknown", () => {
@@ -203,6 +210,28 @@ describe("resolveActor", () => {
     expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
     expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
       "https://api.github.com/repos/X/Y/issues/comments/55"
+    );
+  });
+
+  test("author with NO latest_comment_url: fetches from PR review comments (inline diff)", () => {
+    const notif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getLatestPrReviewComment: jest.fn().mockReturnValue({
+        id: 9001,
+        user: { login: "Husterknupp" },
+      }),
+    });
+
+    expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
+    expect(ghAdapter.getLatestPrReviewComment).toHaveBeenCalledWith(
+      expect.objectContaining({ prNumber: "3" })
     );
   });
 
@@ -394,12 +423,48 @@ describe("run – PR review comment flow (happy path)", () => {
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
+
+  test("inline diff comment (latest_comment_url=null): fetches PR review comment, locks via pulls/comments", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getLatestPrReviewComment: jest.fn().mockReturnValue({
+        id: 9001,
+        user: { login: "Husterknupp" },
+      }),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    // Fetched review comment for actor resolution
+    expect(ghAdapter.getLatestPrReviewComment).toHaveBeenCalledWith(
+      expect.objectContaining({ prNumber: "3" })
+    );
+    // Lock set via pulls/comments endpoint
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "9001", content: "eyes" })
+    );
+    // Event sent
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringMatching(/review comment on your PR #3/)
+    );
+    expect(ghAdapter.markThreadRead).toHaveBeenCalled();
+  });
 });
 
 // ── run: already locked ──────────────────────────────────────────────────────
 
 describe("run – already locked", () => {
-  test("skips event when lock reaction already present", () => {
+  test("skips event when lock reaction already present (issue comment)", () => {
     const notif = makeNotification({ reason: "mention" });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
@@ -411,6 +476,33 @@ describe("run – already locked", () => {
     run(ghAdapter, oclAdapter);
 
     expect(ghAdapter.addReaction).not.toHaveBeenCalled();
+    expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+  });
+
+  test("skips event when lock reaction already present (pr_review inline comment)", () => {
+    const notif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getLatestPrReviewComment: jest.fn().mockReturnValue({
+        id: 9001,
+        user: { login: "Husterknupp" },
+      }),
+      getPrReviewCommentReactions: jest
+        .fn()
+        .mockReturnValue([{ content: "eyes", id: 42 }]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
   });
 });
@@ -451,7 +543,7 @@ describe("run – untrusted actor", () => {
 // ── run: OpenClaw sendEvent fails ────────────────────────────────────────────
 
 describe("run – OpenClaw sendEvent fails", () => {
-  test("releases lock on failure", () => {
+  test("releases lock on failure (issue comment)", () => {
     const notif = makeNotification({ reason: "mention" });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),

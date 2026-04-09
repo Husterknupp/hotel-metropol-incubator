@@ -72,6 +72,47 @@ function removeReaction({ owner, repo, commentId, reactionId }) {
 }
 
 /**
+ * Returns the latest PR review comment (inline diff comment) for a pull request.
+ * Returns null if no review comments exist.
+ * Note: PR review comments use /pulls/comments endpoint, not /issues/comments.
+ */
+function getLatestPrReviewComment({ owner, repo, prNumber }) {
+  const comments = ghJson(
+    `api repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=1&sort=created&direction=desc`
+  );
+  return Array.isArray(comments) && comments.length > 0 ? comments[0] : null;
+}
+
+/**
+ * Adds an emoji reaction to a PR review comment (inline diff comment).
+ * Uses /pulls/comments/{id}/reactions — different from /issues/comments/{id}/reactions.
+ */
+function addPrReviewCommentReaction({ owner, repo, commentId, content }) {
+  ghExec(
+    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions ` +
+      `-f content=${content} -X POST`
+  );
+}
+
+/**
+ * Removes an emoji reaction from a PR review comment.
+ */
+function removePrReviewCommentReaction({ owner, repo, commentId, reactionId }) {
+  ghExec(
+    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions/${reactionId} -X DELETE`
+  );
+}
+
+/**
+ * Lists reactions on a PR review comment.
+ */
+function getPrReviewCommentReactions({ owner, repo, commentId }) {
+  return ghJson(
+    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions`
+  );
+}
+
+/**
  * Marks a notification thread as read.
  */
 function markThreadRead(threadId) {
@@ -98,4 +139,8 @@ module.exports = {
   removeReaction,
   markThreadRead,
   getReactions,
+  getLatestPrReviewComment,
+  addPrReviewCommentReaction,
+  removePrReviewCommentReaction,
+  getPrReviewCommentReactions,
 };

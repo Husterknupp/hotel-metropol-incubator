@@ -43,7 +43,7 @@ function classifyNotification(notification) {
   if (reason === "mention") return "comment";
   if (reason === "assign" && type === "Issue") return "issue";
   if (reason === "review_requested" && type === "PullRequest") return "pr";
-  if (reason === "author" && type === "PullRequest" && hasComment)
+  if (reason === "author" && type === "PullRequest")
     return "pr_review_comment";
   return "unknown";
 }
@@ -63,8 +63,23 @@ function resolveActor(notification, ghAdapter) {
   const reason = notification.reason;
 
   // For mentions and author notifications, the comment tells us who spoke
-  if ((reason === "mention" || reason === "author") && commentUrl) {
+  if (reason === "mention" && commentUrl) {
     return ghAdapter.getActorFromUrl(commentUrl);
+  }
+
+  if (reason === "author") {
+    if (commentUrl) {
+      // Standard path: issue/PR comment included in notification
+      return ghAdapter.getActorFromUrl(commentUrl);
+    }
+    // Fallback: GitHub does NOT set latest_comment_url for PR review comments
+    // (inline diff comments). Fetch the latest one from the PR directly.
+    if (subjectUrl) {
+      const { owner, repo } = parseRepo(notification);
+      const prNumber = subjectUrl.split("/").pop();
+      const latest = ghAdapter.getLatestPrReviewComment({ owner, repo, prNumber });
+      return latest ? latest.user.login : null;
+    }
   }
 
   // For assignments and review requests, the subject creator is the actor
@@ -122,40 +137,66 @@ function buildWarningMessage(actor, repoFull) {
 
 /**
  * Attempt to set the lock reaction on the notification's latest comment.
- * Returns the comment ID used for locking, or null if no comment URL available.
+ * For standard comments: uses latest_comment_url → /issues/comments endpoint.
+ * For PR review comments (latest_comment_url=null): fetches the latest inline
+ * diff comment and uses /pulls/comments endpoint.
+ *
+ * Returns a lock object {commentId, lockType} on success, null if already locked
+ * or no lockable comment found.
  */
 function acquireLock(notification, ghAdapter) {
   const { owner, repo } = parseRepo(notification);
   const latestCommentUrl = notification.subject?.latest_comment_url;
-  if (!latestCommentUrl) return null;
 
-  const commentId = latestCommentUrl.split("/").pop();
-
-  // Check if already locked
-  const existing = ghAdapter.getReactions({ owner, repo, commentId });
-  const alreadyLocked = existing.some((r) => r.content === LOCK_REACTION);
-  if (alreadyLocked) {
-    return null; // Another run is handling this
+  if (latestCommentUrl) {
+    // Standard path: issue comment or regular PR comment
+    const commentId = latestCommentUrl.split("/").pop();
+    const existing = ghAdapter.getReactions({ owner, repo, commentId });
+    const alreadyLocked = existing.some((r) => r.content === LOCK_REACTION);
+    if (alreadyLocked) return null;
+    ghAdapter.addReaction({ owner, repo, commentId, content: LOCK_REACTION });
+    return { commentId, lockType: "issue" };
   }
 
-  ghAdapter.addReaction({ owner, repo, commentId, content: LOCK_REACTION });
-  return commentId;
+  // Fallback: PR review comment (inline diff comment)
+  // GitHub does NOT set latest_comment_url for these.
+  const subjectUrl = notification.subject?.url;
+  if (!subjectUrl) return null;
+
+  const prNumber = subjectUrl.split("/").pop();
+  const latest = ghAdapter.getLatestPrReviewComment({ owner, repo, prNumber });
+  if (!latest) return null;
+
+  const commentId = String(latest.id);
+  const existing = ghAdapter.getPrReviewCommentReactions({ owner, repo, commentId });
+  const alreadyLocked = existing.some((r) => r.content === LOCK_REACTION);
+  if (alreadyLocked) return null;
+
+  ghAdapter.addPrReviewCommentReaction({ owner, repo, commentId, content: LOCK_REACTION });
+  return { commentId, lockType: "pr_review" };
 }
 
 /**
  * Release the lock by removing the reaction.
+ * lock: {commentId, lockType} as returned by acquireLock.
  */
-function releaseLock(notification, commentId, ghAdapter) {
+function releaseLock(notification, lock, ghAdapter) {
+  if (!lock) return;
   const { owner, repo } = parseRepo(notification);
-  const reactions = ghAdapter.getReactions({ owner, repo, commentId });
-  const ours = reactions.find((r) => r.content === LOCK_REACTION);
-  if (ours) {
-    ghAdapter.removeReaction({
-      owner,
-      repo,
-      commentId,
-      reactionId: ours.id,
-    });
+  const { commentId, lockType } = lock;
+
+  if (lockType === "pr_review") {
+    const reactions = ghAdapter.getPrReviewCommentReactions({ owner, repo, commentId });
+    const ours = reactions.find((r) => r.content === LOCK_REACTION);
+    if (ours) {
+      ghAdapter.removePrReviewCommentReaction({ owner, repo, commentId, reactionId: ours.id });
+    }
+  } else {
+    const reactions = ghAdapter.getReactions({ owner, repo, commentId });
+    const ours = reactions.find((r) => r.content === LOCK_REACTION);
+    if (ours) {
+      ghAdapter.removeReaction({ owner, repo, commentId, reactionId: ours.id });
+    }
   }
 }
 
@@ -220,16 +261,16 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     }
 
     // Acquire lock
-    let commentId;
+    let lock;
     try {
-      commentId = acquireLock(notification, ghAdapter);
+      lock = acquireLock(notification, ghAdapter);
     } catch (err) {
       log("error", `Failed to acquire lock: ${err.message}`);
       continue;
     }
 
-    if (!commentId) {
-      log("no_op", `Already locked or no comment URL: ${notification.id}`);
+    if (!lock) {
+      log("no_op", `Already locked or no lockable comment: ${notification.id}`);
       continue;
     }
 
@@ -237,7 +278,7 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     const message = buildEventMessage(kind, notification);
     if (!message) {
       log("no_op", `Could not build event message for: ${notification.id}`);
-      releaseLock(notification, commentId, ghAdapter);
+      releaseLock(notification, lock, ghAdapter);
       continue;
     }
 
@@ -248,7 +289,7 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     } catch (err) {
       log("error", `Failed to send event or mark read: ${err.message}`);
       try {
-        releaseLock(notification, commentId, ghAdapter);
+        releaseLock(notification, lock, ghAdapter);
       } catch (releaseErr) {
         log("error", `Failed to release lock: ${releaseErr.message}`);
       }
