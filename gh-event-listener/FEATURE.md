@@ -92,6 +92,7 @@ Für jedes Szenario:
 | Szenario | Status | Befund |
 |----------|--------|--------|
 | PR Inline Review Comment (`author` + `latest_comment_url=null`) | ✅ validiert | GitHub setzt `latest_comment_url=null`; Fallback via `/pulls/{n}/comments` funktioniert live |
+| `Klassifikation comment` – @-Ping, Kommentar in eigenem Issue, Fremdkommentar auf eigenem Issue | 🟡 als nächstes live zu prüfen | Das ist der aktuelle Produktions-Test-Fokus für morgen; genau hier setzen wir wieder an |
 | @-Mention (`mention`) | ⬜ offen | Test geplant |
 | Thread-Antwort (`comment`) | ⬜ offen | Test nach erster Agenten-Antwort möglich |
 | Issue/PR Assignment (`assign`) | ⬜ offen | — |
