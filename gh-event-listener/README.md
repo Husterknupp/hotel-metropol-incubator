@@ -10,10 +10,12 @@ Designed to run as a cron job — no inbound HTTP traffic required.
 2. Classifies each notification: `comment` / `issue` / `pr` / `pr_review_comment`
 3. **Resolves the actor** by fetching the comment or issue/PR via the GitHub API (the Notifications API does _not_ include an actor field)
 4. Checks the trusted actor filter (`TRUSTED_ACTOR`, default: `Husterknupp`)
-5. Sets an emoji reaction as a distributed lock to prevent duplicate processing
-6. Sends an event to the OpenClaw main agent via `openclaw system event`
+5. Sets an emoji reaction as a distributed lock to prevent duplicate processing — on the triggering comment when one exists, or on the issue/PR itself for a genuine assignment/review request (nothing to comment on yet)
+6. Sends an event to the OpenClaw main agent via `openclaw agent --session-key <key> --message "<text>" --deliver` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window)
 7. Marks the notification thread as read
 8. On failure: removes the lock reaction so the next cron run retries naturally
+
+> **Note:** `reason=assign`/`review_requested` is a *sticky* GitHub notification reason — once assigned, every later activity on the thread (including plain follow-up comments) keeps arriving with that same reason. The listener tells a genuine assignment apart from a follow-up comment by comparing `subject.latest_comment_url` against `subject.url`: identical → genuine assignment (lock on the issue/PR); different → it's actually a comment (lock on that comment, resolve the actor from it).
 
 ## Setup
 
@@ -41,35 +43,27 @@ which gh node openclaw
 crontab -e
 ```
 
-### 3. Add PATH and the cron line
+### 3. Use the wrapper script and add the cron line
 
-```cron
-# Set PATH so cron can find gh, node, and openclaw
-PATH=/home/linuxbrew/.linuxbrew/bin:/home/ubuntu/.nvm/current/bin:/home/ubuntu/.npm-global/bin:/usr/bin:/bin
+Cron's default `PATH` is `/usr/bin:/bin`, so `gh`, `node`, and `openclaw` won't be found without it. `run.sh` sets the required `PATH` and then runs the script — use it directly in crontab instead of setting `PATH` in the crontab itself:
 
-* * * * * cd /home/ubuntu/gh-event-listener && node src/index.js >> /home/ubuntu/gh-event-listener.log 2>&1
+```bash
+#!/usr/bin/env bash
+# run.sh — Wrapper for cron execution
+export PATH="/home/linuxbrew/.linuxbrew/bin:/home/ubuntu/.nvm/current/bin:/home/ubuntu/.npm-global/bin:$PATH"
+cd "$(dirname "$0")" && node src/index.js
 ```
 
-> **Why set PATH?** Cron's default PATH is `/usr/bin:/bin`. Without the extra paths, `gh` and `openclaw` will fail with "command not found".
+```cron
+* * * * * /path/to/gh-event-listener/run.sh >> /path/to/gh-event-listener/logs/gh-event-listener.log 2>&1
+```
 
 ### 4. Verify
 
 ```bash
-crontab -l                          # confirm the entry
-tail -f ~/gh-event-listener.log     # watch for output within 60s
+crontab -l                                    # confirm the entry
+tail -f logs/gh-event-listener.log            # watch for output within 60s
 ```
-
-### 5. Alternative: wrapper script (optional)
-
-If you prefer not to set PATH in crontab, create a wrapper:
-
-```bash
-#!/usr/bin/env bash
-export PATH="/home/linuxbrew/.linuxbrew/bin:$HOME/.nvm/current/bin:$HOME/.npm-global/bin:$PATH"
-cd /home/ubuntu/gh-event-listener && node src/index.js
-```
-
-Then in crontab: `* * * * * /home/ubuntu/gh-event-listener/run.sh >> ~/gh-event-listener.log 2>&1`
 
 ## Configuration
 
@@ -97,7 +91,7 @@ Outcomes: `no_op` | `comment` | `issue` | `pr` | `pr_review_comment` | `error`
 npm test
 ```
 
-Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, the already-locked case, untrusted actor, and lock release on failure.
+Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, sticky `assign`/`review_requested` reason vs. genuine follow-up comment, issue-level vs. comment-level locking, the already-locked case, untrusted actor, and lock release on failure.
 
 ## Project structure
 
@@ -105,6 +99,6 @@ Covers all four happy-path flows (comment, issue, PR, PR review comment), actor 
 src/
   index.js            # Main logic + entry point
   gh-adapter.js       # Thin wrapper around `gh` CLI
-  openclaw-adapter.js # Thin wrapper around `openclaw system event`
-  index.test.js       # Jest tests (25 cases)
+  openclaw-adapter.js # Thin wrapper around `openclaw agent --deliver`
+  index.test.js       # Jest tests (40 cases)
 ```
