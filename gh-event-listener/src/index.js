@@ -31,6 +31,30 @@ function log(outcome, detail = "") {
 }
 
 /**
+ * "assign" and "review_requested" reasons reflect a standing subscription
+ * (why we're watching this thread), not the specific event that triggered
+ * this notification. Once assigned to an issue/PR, GitHub keeps returning
+ * that same reason for any later activity on the thread — including plain
+ * follow-up comments.
+ *
+ * The one subject field that DOES vary per-event is `latest_comment_url`:
+ *   - genuine assignment/review request → equals `subject.url` (nothing to
+ *     comment on yet)
+ *   - follow-up comment → points at the specific comment
+ *     (`.../issues/comments/{id}`), which differs from `subject.url`
+ *
+ * Verified live on 2026-07-14 (Husterknupp/hotel-metropol-incubator #1):
+ * a fresh re-assignment notification had latest_comment_url === subject.url,
+ * while a plain comment on the same already-assigned issue had
+ * latest_comment_url pointing at the new comment.
+ */
+function isActuallyAComment(notification) {
+  const subjectUrl = notification.subject?.url;
+  const commentUrl = notification.subject?.latest_comment_url;
+  return Boolean(commentUrl) && commentUrl !== subjectUrl;
+}
+
+/**
  * Classify a notification into one of: comment | issue | pr | pr_review_comment | unknown
  */
 function classifyNotification(notification) {
@@ -43,6 +67,12 @@ function classifyNotification(notification) {
 
   if (reason === "mention") return "comment";
   if (reason === "comment") return "comment";
+  if (
+    (reason === "assign" || reason === "review_requested") &&
+    isActuallyAComment(notification)
+  ) {
+    return "comment";
+  }
   if (reason === "assign") return "issue";  // works for both Issue and PullRequest
   if (reason === "review_requested") return "pr";  // only exists for PRs
   if (reason === "author" && type === "Issue") return "comment";
@@ -56,8 +86,11 @@ function classifyNotification(notification) {
  * The GitHub Notifications API does NOT include an actor field in the response.
  * We must follow URLs to discover who acted:
  *   - mention/author with latest_comment_url → fetch comment → .user.login
- *   - assign/review_requested → fetch subject.url (the issue/PR itself) → .user.login
- *     (this gives us the issue/PR creator, which is who triggered the event)
+ *   - assign/review_requested that are genuinely about a fresh assignment/review
+ *     request → fetch subject.url (the issue/PR itself) → .user.login (this
+ *     gives us the issue/PR creator, which is who triggered the event)
+ *   - assign/review_requested that are actually a follow-up comment (see
+ *     isActuallyAComment) → fetch the comment author instead, same as mention/comment
  */
 function resolveActor(notification, ghAdapter) {
   const commentUrl = notification.subject?.latest_comment_url;
@@ -84,9 +117,15 @@ function resolveActor(notification, ghAdapter) {
     }
   }
 
-  // For assignments and review requests, the subject creator is the actor
-  if ((reason === "assign" || reason === "review_requested") && subjectUrl) {
-    return ghAdapter.getActorFromUrl(subjectUrl);
+  if (reason === "assign" || reason === "review_requested") {
+    // Sticky reason but really a follow-up comment: actor is the commenter
+    if (isActuallyAComment(notification)) {
+      return ghAdapter.getActorFromUrl(commentUrl);
+    }
+    // Genuine assignment/review request: actor is the subject creator
+    if (subjectUrl) {
+      return ghAdapter.getActorFromUrl(subjectUrl);
+    }
   }
 
   return null;
@@ -141,6 +180,9 @@ function buildWarningMessage(actor, repoFull) {
 /**
  * Attempt to set the lock reaction on the notification's latest comment.
  * For standard comments: uses latest_comment_url → /issues/comments endpoint.
+ * For a genuine assignment/review_request (latest_comment_url === subject.url,
+ * see isActuallyAComment): there is no comment to lock yet, so the reaction
+ * is set on the issue/PR itself via /issues/{number} instead.
  * For PR review comments (latest_comment_url=null): fetches the latest inline
  * diff comment and uses /pulls/comments endpoint.
  *
@@ -150,9 +192,10 @@ function buildWarningMessage(actor, repoFull) {
 function acquireLock(notification, ghAdapter) {
   const { owner, repo } = parseRepo(notification);
   const latestCommentUrl = notification.subject?.latest_comment_url;
+  const subjectUrl = notification.subject?.url;
 
-  if (latestCommentUrl) {
-    // Standard path: issue comment or regular PR comment
+  if (latestCommentUrl && isActuallyAComment(notification)) {
+    // Standard path: real issue comment or regular PR comment
     const commentId = latestCommentUrl.split("/").pop();
     const existing = ghAdapter.getReactions({ owner, repo, commentId });
     const alreadyLocked = existing.some((r) => r.content === LOCK_REACTION);
@@ -161,9 +204,20 @@ function acquireLock(notification, ghAdapter) {
     return { commentId, lockType: "issue" };
   }
 
+  if (latestCommentUrl && !isActuallyAComment(notification)) {
+    // Genuine assignment/review request: nothing has been commented on yet.
+    // latest_comment_url === subject.url, so it doesn't point at a real
+    // comment — lock on the issue/PR itself instead.
+    const issueNumber = subjectUrl.split("/").pop();
+    const existing = ghAdapter.getIssueReactions({ owner, repo, issueNumber });
+    const alreadyLocked = existing.some((r) => r.content === LOCK_REACTION);
+    if (alreadyLocked) return null;
+    ghAdapter.addIssueReaction({ owner, repo, issueNumber, content: LOCK_REACTION });
+    return { commentId: issueNumber, lockType: "issue_subject" };
+  }
+
   // Fallback: PR review comment (inline diff comment)
   // GitHub does NOT set latest_comment_url for these.
-  const subjectUrl = notification.subject?.url;
   if (!subjectUrl) return null;
 
   const prNumber = subjectUrl.split("/").pop();
@@ -193,6 +247,12 @@ function releaseLock(notification, lock, ghAdapter) {
     const ours = reactions.find((r) => r.content === LOCK_REACTION);
     if (ours) {
       ghAdapter.removePrReviewCommentReaction({ owner, repo, commentId, reactionId: ours.id });
+    }
+  } else if (lockType === "issue_subject") {
+    const reactions = ghAdapter.getIssueReactions({ owner, repo, issueNumber: commentId });
+    const ours = reactions.find((r) => r.content === LOCK_REACTION);
+    if (ours) {
+      ghAdapter.removeIssueReaction({ owner, repo, issueNumber: commentId, reactionId: ours.id });
     }
   } else {
     const reactions = ghAdapter.getReactions({ owner, repo, commentId });

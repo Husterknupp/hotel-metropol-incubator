@@ -4,6 +4,8 @@ const {
   resolveActor,
   buildEventMessage,
   buildWarningMessage,
+  acquireLock,
+  releaseLock,
 } = require("./index");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -49,6 +51,9 @@ function makeGhAdapter(overrides = {}) {
     addPrReviewCommentReaction: jest.fn(),
     removePrReviewCommentReaction: jest.fn(),
     getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    getIssueReactions: jest.fn().mockReturnValue([]),
+    addIssueReaction: jest.fn(),
+    removeIssueReaction: jest.fn(),
     ...overrides,
   };
 }
@@ -75,29 +80,52 @@ describe("classifyNotification", () => {
     ).toBe("comment");
   });
 
-  test("reason=assign + Issue → issue", () => {
+  test("reason=assign + Issue, no comment yet (latest_comment_url === subject.url) → issue", () => {
     expect(
       classifyNotification(
         makeNotification({
           reason: "assign",
-          subject: { type: "Issue", url: "https://api.github.com/repos/X/Y/issues/1" },
+          subject: {
+            type: "Issue",
+            url: "https://api.github.com/repos/X/Y/issues/1",
+            latest_comment_url: "https://api.github.com/repos/X/Y/issues/1",
+          },
         })
       )
     ).toBe("issue");
   });
 
-  test("reason=assign + PullRequest → issue (type included in message)", () => {
+  test("reason=assign + PullRequest, no comment yet → issue (type included in message)", () => {
     expect(
       classifyNotification(
         makeNotification({
           reason: "assign",
-          subject: { type: "PullRequest", url: "https://api.github.com/repos/X/Y/pulls/7" },
+          subject: {
+            type: "PullRequest",
+            url: "https://api.github.com/repos/X/Y/pulls/7",
+            latest_comment_url: "https://api.github.com/repos/X/Y/pulls/7",
+          },
         })
       )
     ).toBe("issue");
   });
 
-  test("reason=review_requested + PullRequest → pr", () => {
+  test("reason=assign + Issue, but latest_comment_url points at a real comment → comment (sticky reason bug)", () => {
+    expect(
+      classifyNotification(
+        makeNotification({
+          reason: "assign",
+          subject: {
+            type: "Issue",
+            url: "https://api.github.com/repos/X/Y/issues/1",
+            latest_comment_url: "https://api.github.com/repos/X/Y/issues/comments/42",
+          },
+        })
+      )
+    ).toBe("comment");
+  });
+
+  test("reason=review_requested + PullRequest, no comment yet → pr", () => {
     expect(
       classifyNotification(
         makeNotification({
@@ -105,10 +133,26 @@ describe("classifyNotification", () => {
           subject: {
             type: "PullRequest",
             url: "https://api.github.com/repos/X/Y/pulls/7",
+            latest_comment_url: "https://api.github.com/repos/X/Y/pulls/7",
           },
         })
       )
     ).toBe("pr");
+  });
+
+  test("reason=review_requested + PullRequest, but latest_comment_url points at a real comment → comment (sticky reason bug)", () => {
+    expect(
+      classifyNotification(
+        makeNotification({
+          reason: "review_requested",
+          subject: {
+            type: "PullRequest",
+            url: "https://api.github.com/repos/X/Y/pulls/7",
+            latest_comment_url: "https://api.github.com/repos/X/Y/issues/comments/55",
+          },
+        })
+      )
+    ).toBe("comment");
   });
 
   test("reason=author + Issue → comment (someone commented on our issue)", () => {
@@ -163,6 +207,121 @@ describe("classifyNotification", () => {
         makeNotification({ reason: "ci_activity" })
       )
     ).toBe("unknown");
+  });
+});
+
+// ── classifyNotification: regression — sticky "assign" reason ───────────────
+//
+// GitHub's notification `reason` field is not per-event: it reflects why we
+// are subscribed to the thread, not what the latest activity was. Once
+// assigned to an issue, follow-up comments on that same issue keep arriving
+// with reason: "assign" instead of "comment"/"author".
+//
+// Observed live on 2026-07-14: issue #1 (Husterknupp/hotel-metropol-incubator)
+// has been assigned to arostovd since 2026-04-08 with no new assignment
+// since. Three plain follow-up comments that day each still triggered a
+// false "Work on Issue #1" event (gh-event-listener.log, 16:03:08, 16:23:08,
+// 16:48:55 UTC) instead of the expected "React to comment" event.
+//
+// Confirmed via a live A/B test the same day: a genuine re-assignment
+// notification has subject.latest_comment_url === subject.url (nothing to
+// comment on yet); a follow-up comment notification (still reason: "assign")
+// has latest_comment_url pointing at the actual comment. classifyNotification
+// now uses that field to tell the two apart. Tracked in
+// Husterknupp/hotel-metropol-incubator issue #1.
+describe("classifyNotification — regression: sticky 'assign' reason on follow-up comments", () => {
+  test("a follow-up comment on an already-assigned issue should classify as 'comment', not 'issue'", () => {
+    const staleAssignNotif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/4971711162",
+      },
+    });
+
+    expect(classifyNotification(staleAssignNotif)).toBe("comment");
+  });
+});
+
+// ── acquireLock — regression: genuine assignment must not be locked as a comment ──
+//
+// acquireLock always derived a "comment ID" from subject.latest_comment_url.
+// For a genuine assignment/review_request, latest_comment_url === subject.url
+// (nothing has been commented on yet), so that "comment ID" ends up being the
+// issue/PR number itself (e.g. "1"). addReaction then POSTs to
+// /issues/comments/1/reactions — the wrong endpoint, since comment ID 1 is
+// not this notification's comment. Against the real GitHub API this throws
+// (404), which run() catches as "Failed to acquire lock" — the event is
+// never sent for a first-time assignment. Fix: react on the issue/PR itself
+// (/issues/{number}/reactions) when there's no real comment to lock yet.
+describe("acquireLock/releaseLock — regression: genuine assignment locks the issue, not a nonexistent comment", () => {
+  test("genuine assignment (latest_comment_url === subject.url) locks via issue-level reaction, not a comment", () => {
+    const assignNotif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+      },
+    });
+    const ghAdapter = makeGhAdapter();
+
+    const lock = acquireLock(assignNotif, ghAdapter);
+
+    expect(ghAdapter.addIssueReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ issueNumber: "1", content: "eyes" })
+    );
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
+    expect(lock).toEqual({ commentId: "1", lockType: "issue_subject" });
+  });
+
+  test("follow-up comment on an already-assigned issue still locks via comment-level reaction", () => {
+    const commentNotif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/42",
+      },
+    });
+    const ghAdapter = makeGhAdapter();
+
+    const lock = acquireLock(commentNotif, ghAdapter);
+
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "42", content: "eyes" })
+    );
+    expect(ghAdapter.addIssueReaction).not.toHaveBeenCalled();
+    expect(lock).toEqual({ commentId: "42", lockType: "issue" });
+  });
+
+  test("releaseLock removes the issue-level reaction for lockType 'issue_subject'", () => {
+    const assignNotif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getIssueReactions: jest.fn().mockReturnValue([{ content: "eyes", id: 77 }]),
+    });
+
+    releaseLock(
+      assignNotif,
+      { commentId: "1", lockType: "issue_subject" },
+      ghAdapter
+    );
+
+    expect(ghAdapter.removeIssueReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ issueNumber: "1", reactionId: 77 })
+    );
   });
 });
 
@@ -223,6 +382,25 @@ describe("resolveActor", () => {
     expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
     expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
       "https://api.github.com/repos/X/Y/issues/1"
+    );
+  });
+
+  test("assign but actually a comment: fetches actor from the comment, not the issue creator", () => {
+    const notif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/X/Y/issues/1",
+        latest_comment_url: "https://api.github.com/repos/X/Y/issues/comments/42",
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+    });
+
+    expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
+    expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
+      "https://api.github.com/repos/X/Y/issues/comments/42"
     );
   });
 
@@ -399,7 +577,7 @@ describe("run – issue assignment flow (happy path)", () => {
         type: "Issue",
         url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
         latest_comment_url:
-          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/42",
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1",
       },
     });
     const ghAdapter = makeGhAdapter({
@@ -414,7 +592,9 @@ describe("run – issue assignment flow (happy path)", () => {
     expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
       "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1"
     );
-    expect(ghAdapter.addReaction).toHaveBeenCalled();
+    // Locked on the issue itself, not a (nonexistent) comment
+    expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining("Work on Issue #1")
     );
@@ -432,7 +612,7 @@ describe("run – PR review request flow (happy path)", () => {
         type: "PullRequest",
         url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/7",
         latest_comment_url:
-          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/77",
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/7",
       },
     });
     const ghAdapter = makeGhAdapter({
@@ -446,7 +626,9 @@ describe("run – PR review request flow (happy path)", () => {
     expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
       "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/7"
     );
-    expect(ghAdapter.addReaction).toHaveBeenCalled();
+    // Locked on the PR itself, not a (nonexistent) comment
+    expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining("Review PR #7")
     );

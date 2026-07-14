@@ -19,6 +19,19 @@ function ghJson(args) {
   }
 }
 
+function ghRaw(args) {
+  try {
+    const command = `gh ${args}`;
+    const raw = execSync(command, { encoding: "utf8" });
+    if (DEBUG) {
+	console.debug(`[DEBUG]: command '${command}'\n[DEBUG]: yielded ${raw}`);
+    }
+    return raw.trim();
+  } catch (err) {
+    throw new Error(`gh CLI error (${args.split(" ")[0]}): ${err.message}`);
+  }
+}
+
 function ghExec(args) {
   try {
     const command = `gh ${args}`;
@@ -46,9 +59,9 @@ function getNotifications() {
  * We must follow subject.url or latest_comment_url to find who acted.
  */
 function getActorFromUrl(apiUrl) {
-  const result = ghJson(`api "${apiUrl}" --jq '.user.login'`);
-  // gh --jq returns the raw string, already parsed by ghJson
-  return typeof result === "string" ? result : null;
+  // gh --jq returns a bare, unquoted string for scalar fields — not JSON, so use ghRaw, not ghJson
+  const result = ghRaw(`api "${apiUrl}" --jq '.user.login'`);
+  return result || null;
 }
 
 /**
@@ -132,6 +145,36 @@ function getReactions({ owner, repo, commentId }) {
   );
 }
 
+/**
+ * Lists reactions on an issue/PR itself (not a comment).
+ * Used for locking a genuine assignment/review_request notification, where
+ * there is no comment yet to react to.
+ */
+function getIssueReactions({ owner, repo, issueNumber }) {
+  return ghJson(`api repos/${owner}/${repo}/issues/${issueNumber}/reactions`);
+}
+
+/**
+ * Adds an emoji reaction to an issue/PR itself.
+ * GitHub's issue reactions endpoint also accepts PR numbers, since PRs are
+ * issues under the hood for this API.
+ */
+function addIssueReaction({ owner, repo, issueNumber, content }) {
+  ghExec(
+    `api repos/${owner}/${repo}/issues/${issueNumber}/reactions ` +
+      `-f content=${content} -X POST`
+  );
+}
+
+/**
+ * Removes an emoji reaction from an issue/PR itself.
+ */
+function removeIssueReaction({ owner, repo, issueNumber, reactionId }) {
+  ghExec(
+    `api repos/${owner}/${repo}/issues/${issueNumber}/reactions/${reactionId} -X DELETE`
+  );
+}
+
 module.exports = {
   getNotifications,
   getActorFromUrl,
@@ -139,6 +182,9 @@ module.exports = {
   removeReaction,
   markThreadRead,
   getReactions,
+  getIssueReactions,
+  addIssueReaction,
+  removeIssueReaction,
   getLatestPrReviewComment,
   addPrReviewCommentReaction,
   removePrReviewCommentReaction,
