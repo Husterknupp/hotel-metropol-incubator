@@ -70,7 +70,7 @@ function getActorFromUrl(apiUrl) {
  */
 function addReaction({ owner, repo, commentId, content }) {
   ghExec(
-    `api repos/${owner}/${repo}/issues/comments/${commentId}/reactions ` +
+    `api 'repos/${owner}/${repo}/issues/comments/${commentId}/reactions' ` +
       `-f content=${content} -X POST`
   );
 }
@@ -80,7 +80,7 @@ function addReaction({ owner, repo, commentId, content }) {
  */
 function removeReaction({ owner, repo, commentId, reactionId }) {
   ghExec(
-    `api repos/${owner}/${repo}/issues/comments/${commentId}/reactions/${reactionId} -X DELETE`
+    `api 'repos/${owner}/${repo}/issues/comments/${commentId}/reactions/${reactionId}' -X DELETE`
   );
 }
 
@@ -91,7 +91,7 @@ function removeReaction({ owner, repo, commentId, reactionId }) {
  */
 function getLatestPrReviewComment({ owner, repo, prNumber }) {
   const comments = ghJson(
-    `api repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=1&sort=created&direction=desc`
+    `api 'repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=1&sort=created&direction=desc'`
   );
   return Array.isArray(comments) && comments.length > 0 ? comments[0] : null;
 }
@@ -102,7 +102,7 @@ function getLatestPrReviewComment({ owner, repo, prNumber }) {
  */
 function addPrReviewCommentReaction({ owner, repo, commentId, content }) {
   ghExec(
-    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions ` +
+    `api 'repos/${owner}/${repo}/pulls/comments/${commentId}/reactions' ` +
       `-f content=${content} -X POST`
   );
 }
@@ -112,7 +112,7 @@ function addPrReviewCommentReaction({ owner, repo, commentId, content }) {
  */
 function removePrReviewCommentReaction({ owner, repo, commentId, reactionId }) {
   ghExec(
-    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions/${reactionId} -X DELETE`
+    `api 'repos/${owner}/${repo}/pulls/comments/${commentId}/reactions/${reactionId}' -X DELETE`
   );
 }
 
@@ -121,7 +121,7 @@ function removePrReviewCommentReaction({ owner, repo, commentId, reactionId }) {
  */
 function getPrReviewCommentReactions({ owner, repo, commentId }) {
   return ghJson(
-    `api repos/${owner}/${repo}/pulls/comments/${commentId}/reactions`
+    `api 'repos/${owner}/${repo}/pulls/comments/${commentId}/reactions'`
   );
 }
 
@@ -133,7 +133,7 @@ function markThreadRead(threadId) {
 	console.debug(`[DEBUG]: skipping markThreadRead for thread ${threadId} (DEBUG mode)`);
 	return;
   }
-  ghExec(`api notifications/threads/${threadId} -X PATCH`);
+  ghExec(`api 'notifications/threads/${threadId}' -X PATCH`);
 }
 
 /**
@@ -141,7 +141,7 @@ function markThreadRead(threadId) {
  */
 function getReactions({ owner, repo, commentId }) {
   return ghJson(
-    `api repos/${owner}/${repo}/issues/comments/${commentId}/reactions`
+    `api 'repos/${owner}/${repo}/issues/comments/${commentId}/reactions'`
   );
 }
 
@@ -151,7 +151,7 @@ function getReactions({ owner, repo, commentId }) {
  * there is no comment yet to react to.
  */
 function getIssueReactions({ owner, repo, issueNumber }) {
-  return ghJson(`api repos/${owner}/${repo}/issues/${issueNumber}/reactions`);
+  return ghJson(`api 'repos/${owner}/${repo}/issues/${issueNumber}/reactions'`);
 }
 
 /**
@@ -161,7 +161,7 @@ function getIssueReactions({ owner, repo, issueNumber }) {
  */
 function addIssueReaction({ owner, repo, issueNumber, content }) {
   ghExec(
-    `api repos/${owner}/${repo}/issues/${issueNumber}/reactions ` +
+    `api 'repos/${owner}/${repo}/issues/${issueNumber}/reactions' ` +
       `-f content=${content} -X POST`
   );
 }
@@ -171,7 +171,7 @@ function addIssueReaction({ owner, repo, issueNumber, content }) {
  */
 function removeIssueReaction({ owner, repo, issueNumber, reactionId }) {
   ghExec(
-    `api repos/${owner}/${repo}/issues/${issueNumber}/reactions/${reactionId} -X DELETE`
+    `api 'repos/${owner}/${repo}/issues/${issueNumber}/reactions/${reactionId}' -X DELETE`
   );
 }
 
