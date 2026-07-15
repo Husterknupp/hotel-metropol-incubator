@@ -97,6 +97,20 @@ function getLatestPrReviewComment({ owner, repo, prNumber }) {
 }
 
 /**
+ * Returns ALL inline review comments for a pull request, oldest first.
+ * A submitted review bundles many inline comments under one notification, so we
+ * need the full list to process every one (issue #8), not just the newest.
+ * Capped at 100 per run (one page); a review with more comments than that is
+ * handled across successive polls as earlier comments get marked done.
+ */
+function getPrReviewComments({ owner, repo, prNumber }) {
+  const comments = ghJson(
+    `api 'repos/${owner}/${repo}/pulls/${prNumber}/comments?per_page=100&sort=created&direction=asc'`
+  );
+  return Array.isArray(comments) ? comments : [];
+}
+
+/**
  * Adds an emoji reaction to a PR review comment (inline diff comment).
  * Uses /pulls/comments/{id}/reactions — different from /issues/comments/{id}/reactions.
  */
@@ -186,6 +200,7 @@ module.exports = {
   addIssueReaction,
   removeIssueReaction,
   getLatestPrReviewComment,
+  getPrReviewComments,
   addPrReviewCommentReaction,
   removePrReviewCommentReaction,
   getPrReviewCommentReactions,

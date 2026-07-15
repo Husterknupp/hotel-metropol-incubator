@@ -48,6 +48,7 @@ function makeGhAdapter(overrides = {}) {
       id: 9001,
       user: { login: "Husterknupp" },
     }),
+    getPrReviewComments: jest.fn().mockReturnValue([]),
     addPrReviewCommentReaction: jest.fn(),
     removePrReviewCommentReaction: jest.fn(),
     getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
@@ -689,7 +690,7 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
 
-  test("inline diff comment (latest_comment_url=null): fetches PR review comment, locks via pulls/comments", () => {
+  test("inline diff comment (latest_comment_url=null): batches all review comments, locks each, one event", () => {
     const inlineReviewNotif = makeNotification({
       reason: "author",
       subject: {
@@ -700,29 +701,183 @@ describe("run – PR review comment flow (happy path)", () => {
     });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
-      getLatestPrReviewComment: jest.fn().mockReturnValue({
-        id: 9001,
-        user: { login: "Husterknupp" },
-      }),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 9001, user: { login: "Husterknupp" }, body: "First comment" },
+      ]),
       getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
     });
     const oclAdapter = makeOclAdapter();
 
     run(ghAdapter, oclAdapter);
 
-    // Fetched review comment for actor resolution
-    expect(ghAdapter.getLatestPrReviewComment).toHaveBeenCalledWith(
+    // Fetched the FULL list of review comments (not just the latest)
+    expect(ghAdapter.getPrReviewComments).toHaveBeenCalledWith(
       expect.objectContaining({ prNumber: "3" })
     );
     // Lock set via pulls/comments endpoint
     expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
       expect.objectContaining({ commentId: "9001", content: "eyes" })
     );
-    // Event sent
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringMatching(/review comment on your PR #3/)
+      expect.stringMatching(/review comment\(s\) on your PR #3/)
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
+  });
+
+  test("issue #8: a bundled review with several comments processes EVERY trusted comment, not just the newest", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    // Four inline comments from the trusted reviewer + one of our own replies.
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 3582979691, user: { login: "Husterknupp" }, body: "timeout question" },
+        { id: 3583055321, user: { login: "Husterknupp" }, body: "lock release question" },
+        { id: 3583072147, user: { login: "Husterknupp" }, body: "make these explicit" },
+        { id: 3583107478, user: { login: "Husterknupp" }, body: "untrusted actor test" },
+        { id: 3585505524, user: { login: "arostovd" }, body: "our own reply" },
+      ]),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    // All four trusted comments get locked — our own reply does NOT
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
+      (c) => c[0].commentId
+    );
+    expect(lockedIds).toEqual(
+      expect.arrayContaining(["3582979691", "3583055321", "3583072147", "3583107478"])
+    );
+    expect(lockedIds).not.toContain("3585505524");
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledTimes(4);
+
+    // Exactly ONE agent event that names all four comments
+    expect(oclAdapter.sendEvent).toHaveBeenCalledTimes(1);
+    const msg = oclAdapter.sendEvent.mock.calls[0][0];
+    expect(msg).toMatch(/React to 4 review comment\(s\)/);
+    for (const id of [3582979691, 3583055321, 3583072147, 3583107478]) {
+      expect(msg).toContain(String(id));
+    }
+
+    // Thread only marked read after the batch was dispatched
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
+  });
+
+  test("issue #8: already-handled comments (carrying our lock) are not re-processed", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 111, user: { login: "Husterknupp" }, body: "already done" },
+        { id: 222, user: { login: "Husterknupp" }, body: "new one" },
+      ]),
+      getPrReviewCommentReactions: jest.fn((args) =>
+        args.commentId === "111" ? [{ content: "eyes", id: 7 }] : []
+      ),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    // Only the un-handled comment 222 gets locked and processed
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
+      (c) => c[0].commentId
+    );
+    expect(lockedIds).toEqual(["222"]);
+    const msg = oclAdapter.sendEvent.mock.calls[0][0];
+    expect(msg).toMatch(/React to 1 review comment/);
+    expect(msg).toContain("222");
+    expect(msg).not.toContain("111");
+  });
+
+  test("issue #8: a stranger's inline comment in the batch → warning + lock, trusted ones still processed", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 111, user: { login: "Husterknupp" }, body: "trusted comment" },
+        { id: 999, user: { login: "DriveByStranger" }, body: "sneaky comment" },
+      ]),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    // Warning about the stranger
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("untrusted actor")
+    );
+    // Both the stranger's comment (to stop re-warning) and the trusted one get locked
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
+      (c) => c[0].commentId
+    );
+    expect(lockedIds).toEqual(expect.arrayContaining(["111", "999"]));
+    // The trusted comment is still handled in a batch event
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringMatching(/React to 1 review comment/)
+    );
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
+  });
+
+  test("issue #8: sendEvent failure releases every lock so the batch retries", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 111, user: { login: "Husterknupp" }, body: "a" },
+        { id: 222, user: { login: "Husterknupp" }, body: "b" },
+      ]),
+      // First reaction check (partition) empty; on release, our lock is present
+      getPrReviewCommentReactions: jest
+        .fn()
+        .mockReturnValueOnce([]) // 111 partition
+        .mockReturnValueOnce([]) // 222 partition
+        .mockReturnValue([{ content: "eyes", id: 77 }]), // release lookups
+    });
+    const oclAdapter = makeOclAdapter({
+      sendEvent: jest.fn().mockImplementation(() => {
+        throw new Error("Gateway down");
+      }),
+    });
+
+    run(ghAdapter, oclAdapter);
+
+    // Both locks released, thread NOT marked read (so the next poll retries)
+    const releasedIds = ghAdapter.removePrReviewCommentReaction.mock.calls.map(
+      (c) => c[0].commentId
+    );
+    expect(releasedIds).toEqual(expect.arrayContaining(["111", "222"]));
+    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
   });
 });
 
@@ -744,7 +899,7 @@ describe("run – already locked", () => {
     expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
   });
 
-  test("skips event when lock reaction already present (pr_review inline comment)", () => {
+  test("skips event when every inline comment already carries our lock", () => {
     const notif = makeNotification({
       reason: "author",
       subject: {
@@ -755,10 +910,9 @@ describe("run – already locked", () => {
     });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
-      getLatestPrReviewComment: jest.fn().mockReturnValue({
-        id: 9001,
-        user: { login: "Husterknupp" },
-      }),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 9001, user: { login: "Husterknupp" }, body: "already handled" },
+      ]),
       getPrReviewCommentReactions: jest
         .fn()
         .mockReturnValue([{ content: "eyes", id: 42 }]),
@@ -769,6 +923,8 @@ describe("run – already locked", () => {
 
     expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+    // Nothing left to do → thread marked read
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
   });
 });
 
@@ -897,10 +1053,9 @@ describe("run – self-triggered event (our own bot)", () => {
     });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
-      getLatestPrReviewComment: jest.fn().mockReturnValue({
-        id: 3583107478,
-        user: { login: "arostovd" },
-      }),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 3583107478, user: { login: "arostovd" }, body: "our own reply" },
+      ]),
     });
     const oclAdapter = makeOclAdapter();
 

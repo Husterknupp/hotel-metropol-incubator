@@ -84,6 +84,7 @@ describe("all gh api URLs are shell-safe", () => {
     ["removeIssueReaction", () => gh.removeIssueReaction(args)],
     ["markThreadRead", () => gh.markThreadRead(args.threadId)],
     ["getLatestPrReviewComment", () => gh.getLatestPrReviewComment(args)],
+    ["getPrReviewComments", () => gh.getPrReviewComments(args)],
   ];
 
   test.each(calls)("%s never exposes an unquoted & to the shell", (_name, invoke) => {

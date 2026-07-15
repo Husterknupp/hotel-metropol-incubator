@@ -18,9 +18,13 @@ Das Script pollt die GitHub Notifications API und triggert den OpenClaw-Agenten 
 | 3 | Issue/PR wird dem Agenten assigned | `assign` | Issue oder PullRequest | `issue` | ✅ via `subject.url` | `Work on Issue/PullRequest #N (repo XYZ)` |
 | 4 | Agent wird als PR-Reviewer assigned | `review_requested` | PullRequest | `pr` | ❌ (GitHub enforced — nur Repo-Member) | `Review PR #N (repo XYZ)` |
 | 5 | Kommentar auf Issue, das Agent erstellt hat | `author` | `Issue` | `comment` | ✅ via `latest_comment_url` | `React to Husterknupp's GitHub comment (repo XYZ)` |
-| 6 | Kommentar auf PR, den Agent erstellt hat | `author` | `PullRequest` | `pr_review_comment` | ✅ via `latest_comment_url` oder PR review comments Fallback | `React to a review comment on your PR #N (repo XYZ). Do not @-mention anyone.` |
+| 6 | Kommentar auf PR, den Agent erstellt hat | `author` | `PullRequest` | `pr_review_comment` | ✅ pro Kommentar (siehe Batch-Handling) | `React to N review comment(s) on your PR #N …` (Inline-Batch) bzw. Einzel-Message (reguläre PR-Konversation) |
 
 Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-Channel.
+
+**Batch-Handling für Inline-Review-Kommentare (Issue #8):** Ein abgeschickter Review bündelt mehrere Inline-Kommentare unter *einer* Notification. Für den Inline-Fall (`author` + `PullRequest` + `latest_comment_url=null`) holt der Listener daher **alle** Inline-Review-Kommentare (`/pulls/{n}/comments`), filtert pro Autor (eigene überspringen, bereits gelockte überspringen, fremde → Warnung + Lock, vertrauenswürdige → sammeln) und schickt **einen** Event, der alle offenen Kommentare auflistet. Die Notification wird erst als gelesen markiert, wenn alle bearbeitet sind — so geht kein Kommentar mehr verloren. Reguläre PR-Konversationskommentare (mit `latest_comment_url`) behalten den Einzel-Pfad.
+
+**Happy-Path-Kanalregel:** Jede Event-Message (nicht die Warnung) enthält die Anweisung, ausführlich auf GitHub zu antworten und in Discord nur eine kurze Zusammenfassung mit Link zu posten (Token-Ersparnis).
 
 ---
 
@@ -29,10 +33,12 @@ Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-
 - **Polling**: Cron-basiert (~60s, via `run.sh`). Kein Daemon, kein HTTP-Inbound.
 - **Trigger-Primitive**: `openclaw agent --session-key <key> --message "<text>" --deliver` — synchroner Agent-Turn über das Gateway, unabhängig vom Heartbeat/Active-Hours-Fenster. (`openclaw system event` wurde verworfen — puffert nur bis zum nächsten Heartbeat-Tick, siehe Issue #1.)
 - **Sticky `reason`-Erkennung**: `assign`/`review_requested` bleibt als `reason` bestehen, solange die Zuweisung/Review-Anfrage aktiv ist — auch für reine Folgekommentare auf demselben Thread. `isActuallyAComment()` unterscheidet über `subject.latest_comment_url` vs. `subject.url`: identisch → echte Zuweisung; unterschiedlich → tatsächlich ein Kommentar.
+- **Selbst-Erkennung (`SELF_ACTOR`)**: Kommentare/Reaktionen des eigenen Bot-Accounts werden ignoriert — keine Warnung, kein Re-Trigger, aber Thread wird gelesen. Verhindert die Rückkopplungsschleife, in der jede eigene Antwort eine neue „untrusted actor"-Warnung erzeugt (Fund 2026-07-15).
 - **Locking**: Emoji-Reaktion (`eyes`).
   - Echter Kommentar vorhanden → Reaktion auf dem Kommentar (`/issues/comments/{id}/reactions`)
   - Echte Zuweisung/Review-Anfrage (kein Kommentar vorhanden) → Reaktion auf dem Issue/PR selbst (`/issues/{n}/reactions`)
-  - Zweiter paralleler Lauf findet Reaktion → bricht ab. Bei Fehler: Reaktion entfernen → nächster Cron-Lauf verarbeitet erneut.
+  - Inline-Review-Batch → Reaktion auf *jedem* offenen Inline-Kommentar (`/pulls/comments/{id}/reactions`)
+  - Zweiter paralleler Lauf findet Reaktion → bricht ab. Bei Fehler: Reaktion(en) entfernen → nächster Cron-Lauf verarbeitet erneut.
 - **Actor-Auflösung**: GitHub Notifications API liefert kein `actor`-Feld. Wir folgen URLs:
   - `mention`/`comment` → `latest_comment_url` → `.user.login`
   - `author` + `latest_comment_url` gesetzt → `latest_comment_url` → `.user.login`
@@ -49,6 +55,7 @@ Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-
 | Env-Variable | Default | Beschreibung |
 |---|---|---|
 | `TRUSTED_ACTOR` | `Husterknupp` | GitHub-Username, dessen Events verarbeitet werden |
+| `SELF_ACTOR` | `arostovd` | Eigener Bot-Account. Events aus eigenen Kommentaren werden ignoriert (keine Warnung, kein Re-Trigger), damit sich der Listener nicht selbst füttert |
 | `LOCK_REACTION` | `eyes` | Emoji-Reaktion als verteiltes Lock |
 | `WARN_CHANNEL` | `null` | Discord-Channel für Third-Party-Warnungen |
 | `DEBUG` | `false` | `true`/`1` → debug logs + `markThreadRead` wird übersprungen |
@@ -64,10 +71,15 @@ Verbleibende Arbeit ist als eigene GitHub-Issues getrackt, nicht mehr inline hie
 
 - [#4](https://github.com/Husterknupp/hotel-metropol-incubator/issues/4) Live-Validierung `review_requested`-Flow + `reason=comment`-Thread-Antworten
 - [#5](https://github.com/Husterknupp/hotel-metropol-incubator/issues/5) (Low priority) Flock-Guard gegen überlappende Cron-Läufe
-- [#6](https://github.com/Husterknupp/hotel-metropol-incubator/issues/6) Sichtbares Fehler-Signal auf GitHub bei gescheitertem `openclaw agent`-Aufruf
+- [#6](https://github.com/Husterknupp/hotel-metropol-incubator/issues/6) Sichtbares Fehler-Signal auf GitHub bei gescheitertem `openclaw agent`-Aufruf — **überschneidet sich mit #7**, sollte zusammengeführt werden
+- [#7](https://github.com/Husterknupp/hotel-metropol-incubator/issues/7) Async `sendEvent` (feuern-und-vergessen) + Fehler-Signalisierung + „forwarded/pending"-Reaktion
+- [#8](https://github.com/Husterknupp/hotel-metropol-incubator/issues/8) ✅ Batch-Verarbeitung aller Inline-Review-Kommentare — in diesem PR umgesetzt
 
 ### ✅ Erledigt
 
+- [x] **Selbst-Trigger-Schleife behoben** (Fund + Fix 2026-07-15): eigener Bot-Account (`arostovd`) wurde als „untrusted actor" gewarnt → Minuten-Schleife. `SELF_ACTOR`-Erkennung überspringt eigene Events still, markiert Thread aber gelesen. Regressionstest.
+- [x] **Batch-Verarbeitung Inline-Review-Kommentare** (Issue #8, Fix 2026-07-15): gebündelter Review verlor alle Kommentare außer dem neuesten. `handlePrReviewCommentBatch` holt alle, filtert pro Autor, lockt jeden, schickt einen Event, markiert Thread erst am Ende gelesen. 8 neue Tests.
+- [x] **Kanalregel in Happy-Path-Messages** (2026-07-15): ausführlich auf GitHub, in Discord nur Zusammenfassung mit Link — spart Tokens.
 - [x] `subject.actor.login` → Actor muss aus URL nachgeladen werden (`resolveActor`)
 - [x] Cron PATH-Fix (`run.sh` Wrapper mit korrektem PATH)
 - [x] Trigger-Primitive: `openclaw system event` verworfen (puffert nur bis zum nächsten Heartbeat) → `openclaw agent --session-key ... --deliver` (synchroner Turn, live validiert 2026-07-14)
@@ -95,7 +107,8 @@ Für jedes Szenario:
 
 | Szenario | Status | Befund |
 |----------|--------|--------|
-| PR Inline Review Comment (`author` + `latest_comment_url=null`) | ✅ validiert | GitHub setzt `latest_comment_url=null`; Fallback via `/pulls/{n}/comments` funktioniert live |
+| PR Inline Review Comment — einzeln (`author` + `latest_comment_url=null`) | ✅ validiert | GitHub setzt `latest_comment_url=null`; `/pulls/{n}/comments` funktioniert live |
+| PR Inline Review Comment — gebündelter Review (mehrere Kommentare, Issue #8) | 🟡 Unit-getestet | Batch-Handling umgesetzt + 8 Tests; Live-Validierung mit echtem Multi-Kommentar-Review steht noch aus |
 | @-Mention (`mention`) | ✅ validiert | Kommentar mit @-Ping → binnen einer Minute abgeholt, auf GitHub reagiert (siehe party-insights-shenanigans#50) |
 | Issue-Zuweisung, echte Erstzuweisung (`assign`) | ✅ validiert | Live A/B-Test 2026-07-14 (unassign + reassign vs. Folgekommentar); Lock-Fix bestätigt über Regressionstests |
 | Folgekommentar auf zugewiesenem Issue (sticky `reason=assign`) | ✅ validiert | Live bestätigt 2026-07-14: Kommentar auf Issue #1 wurde korrekt als `comment`, nicht als `issue` klassifiziert |
@@ -112,3 +125,5 @@ Für jedes Szenario:
 - Issue #4 (Live-Validierung `review_requested` + `reason=comment`): https://github.com/Husterknupp/hotel-metropol-incubator/issues/4
 - Issue #5 (Flock-Guard, low priority): https://github.com/Husterknupp/hotel-metropol-incubator/issues/5
 - Issue #6 (Fehler-Sichtbarkeit auf GitHub): https://github.com/Husterknupp/hotel-metropol-incubator/issues/6
+- Issue #7 (Async `sendEvent` + Fehler-Signal + Ack-Reaktion): https://github.com/Husterknupp/hotel-metropol-incubator/issues/7
+- Issue #8 (Batch-Verarbeitung Inline-Review-Kommentare): https://github.com/Husterknupp/hotel-metropol-incubator/issues/8

@@ -9,13 +9,16 @@ Designed to run as a cron job — no inbound HTTP traffic required.
 1. Fetches unread GitHub notifications via `gh` CLI
 2. Classifies each notification: `comment` / `issue` / `pr` / `pr_review_comment`
 3. **Resolves the actor** by fetching the comment or issue/PR via the GitHub API (the Notifications API does _not_ include an actor field)
-4. Checks the trusted actor filter (`TRUSTED_ACTOR`, default: `Husterknupp`)
-5. Sets an emoji reaction as a distributed lock to prevent duplicate processing — on the triggering comment when one exists, or on the issue/PR itself for a genuine assignment/review request (nothing to comment on yet)
-6. Sends an event to the OpenClaw main agent via `openclaw agent --session-key <key> --message "<text>" --deliver` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window)
-7. Marks the notification thread as read
-8. On failure: removes the lock reaction so the next cron run retries naturally
+4. **Skips self-triggered events**: activity from our own bot account (`SELF_ACTOR`, default: `arostovd`) is ignored — no warning, no re-trigger — but the thread is still marked read, so replying on a PR can't feed the listener back into itself
+5. Checks the trusted actor filter (`TRUSTED_ACTOR`, default: `Husterknupp`)
+6. Sets an emoji reaction as a distributed lock to prevent duplicate processing — on the triggering comment when one exists, or on the issue/PR itself for a genuine assignment/review request (nothing to comment on yet)
+7. Sends an event to the OpenClaw main agent via `openclaw agent --session-key <key> --message "<text>" --deliver` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window). Happy-path events instruct the agent to answer in full on GitHub and only post a short summary (with a link) to Discord.
+8. Marks the notification thread as read
+9. On failure: removes the lock reaction so the next cron run retries naturally
 
 > **Note:** `reason=assign`/`review_requested` is a *sticky* GitHub notification reason — once assigned, every later activity on the thread (including plain follow-up comments) keeps arriving with that same reason. The listener tells a genuine assignment apart from a follow-up comment by comparing `subject.latest_comment_url` against `subject.url`: identical → genuine assignment (lock on the issue/PR); different → it's actually a comment (lock on that comment, resolve the actor from it).
+
+> **Batched reviews (inline comments):** a submitted PR review bundles several inline comments under a single notification. For the inline case (`author` + `PullRequest` + `latest_comment_url=null`) the listener fetches **all** review comments (`/pulls/{n}/comments`), filters them per author (skip our own, skip already-locked, warn on strangers, collect the trusted ones), locks every trusted comment, and sends **one** event that lists them all — marking the thread read only once the whole batch is dispatched. This prevents dropping every comment but the newest.
 
 ## Setup
 
@@ -70,6 +73,7 @@ tail -f logs/gh-event-listener.log            # watch for output within 60s
 | Variable | Default | Description |
 |---|---|---|
 | `TRUSTED_ACTOR` | `Husterknupp` | GitHub username whose events trigger the agent |
+| `SELF_ACTOR` | `arostovd` | Our own bot account. Its own comments/reactions are ignored so the listener can't loop on its own replies |
 | `LOCK_REACTION` | `eyes` | Emoji reaction used as distributed lock |
 | `WARN_CHANNEL` | _(not set)_ | Discord channel ID for untrusted-actor warnings. If not set, the agent uses its default channel. |
 
@@ -91,7 +95,7 @@ Outcomes: `no_op` | `comment` | `issue` | `pr` | `pr_review_comment` | `error`
 npm test
 ```
 
-Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, sticky `assign`/`review_requested` reason vs. genuine follow-up comment, issue-level vs. comment-level locking, the already-locked case, untrusted actor, and lock release on failure.
+Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, sticky `assign`/`review_requested` reason vs. genuine follow-up comment, issue-level vs. comment-level locking, the already-locked case, untrusted actor, self-triggered events, batched inline review comments (issue #8), and lock release on failure.
 
 ## Project structure
 
@@ -99,6 +103,7 @@ Covers all four happy-path flows (comment, issue, PR, PR review comment), actor 
 src/
   index.js            # Main logic + entry point
   gh-adapter.js       # Thin wrapper around `gh` CLI
+  gh-adapter.test.js  # Jest tests for shell-safe gh api URLs
   openclaw-adapter.js # Thin wrapper around `openclaw agent --deliver`
-  index.test.js       # Jest tests (40 cases)
+  index.test.js       # Jest tests
 ```

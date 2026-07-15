@@ -181,6 +181,27 @@ function buildEventMessage(kind, notification) {
 }
 
 /**
+ * Build one agent event that enumerates every trusted review comment in a
+ * bundled review, so the agent addresses them all in a single turn (issue #8)
+ * instead of only the newest.
+ */
+function buildPrReviewBatchMessage(prNumber, repoFull, comments) {
+  const list = comments
+    .map((c) => {
+      const body = (c.body || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      return `- comment ${c.id}: ${body}`;
+    })
+    .join("\n");
+  return (
+    `React to ${comments.length} review comment(s) on your PR #${prNumber} (repo ${repoFull}). ` +
+    `Address every comment listed below and reply on its thread. ` +
+    `Do not @-mention anyone — this was triggered automatically.` +
+    CHANNEL_INSTRUCTION +
+    `\n\nComments:\n${list}`
+  );
+}
+
+/**
  * Build the warning message for an untrusted actor event.
  */
 function buildWarningMessage(actor, repoFull) {
@@ -281,6 +302,132 @@ function releaseLock(notification, lock, ghAdapter) {
 }
 
 /**
+ * Handle a PR inline-review-comment notification as a BATCH.
+ *
+ * A submitted review bundles many inline comments under a single notification
+ * thread. The previous flow only ever looked at the newest inline comment and
+ * then marked the whole thread read — silently dropping every earlier comment
+ * (issue #8). Here we fetch ALL inline review comments, filter per author, and
+ * process every unhandled trusted one in a single agent turn.
+ *
+ * Per-comment rules:
+ *   - authored by us (SELF_ACTOR)      → skip (our own replies must not loop)
+ *   - already carrying our lock 👀      → skip (already handled)
+ *   - authored by the trusted actor    → collect for one batched event
+ *   - anyone else                      → warn once, then lock so we don't re-warn
+ *
+ * The notification thread is only marked read once every in-scope comment has
+ * been locked and the batched event dispatched — so no comment is dropped.
+ */
+function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
+  const { owner, repo } = parseRepo(notification);
+  const subjectUrl = notification.subject?.url;
+  const repoFull = notification.repository?.full_name;
+
+  if (!subjectUrl) {
+    log("no_op", `No subject URL for PR review notification: ${notification.id}`);
+    ghAdapter.markThreadRead(notification.id);
+    return;
+  }
+
+  const prNumber = subjectUrl.split("/").pop();
+  const comments = ghAdapter.getPrReviewComments({ owner, repo, prNumber });
+
+  const trusted = [];
+  const untrusted = [];
+  for (const c of comments) {
+    const author = c.user?.login;
+    if (author === SELF_ACTOR) continue;
+
+    const reactions = ghAdapter.getPrReviewCommentReactions({
+      owner,
+      repo,
+      commentId: String(c.id),
+    });
+    const alreadyHandled = reactions.some((r) => r.content === LOCK_REACTION);
+    if (alreadyHandled) continue;
+
+    if (author === TRUSTED_ACTOR) trusted.push(c);
+    else untrusted.push({ comment: c, author });
+  }
+
+  // Untrusted commenters: warn once, then lock the comment so the next poll
+  // doesn't warn about it again.
+  for (const { comment, author } of untrusted) {
+    log("error", `Untrusted actor: ${author}`);
+    try {
+      oclAdapter.sendEvent(buildWarningMessage(author, repoFull));
+    } catch (err) {
+      log("error", `Failed to send warning: ${err.message}`);
+    }
+    try {
+      ghAdapter.addPrReviewCommentReaction({
+        owner,
+        repo,
+        commentId: String(comment.id),
+        content: LOCK_REACTION,
+      });
+    } catch (err) {
+      log("error", `Failed to lock untrusted comment ${comment.id}: ${err.message}`);
+    }
+  }
+
+  if (trusted.length === 0) {
+    log("no_op", `No unhandled trusted PR review comments: ${notification.id}`);
+    ghAdapter.markThreadRead(notification.id);
+    return;
+  }
+
+  // Lock every trusted comment before dispatching so a concurrent poll won't
+  // double-process the batch.
+  const locked = [];
+  for (const c of trusted) {
+    try {
+      ghAdapter.addPrReviewCommentReaction({
+        owner,
+        repo,
+        commentId: String(c.id),
+        content: LOCK_REACTION,
+      });
+      locked.push(c);
+    } catch (err) {
+      log("error", `Failed to lock comment ${c.id}: ${err.message}`);
+    }
+  }
+
+  const message = buildPrReviewBatchMessage(prNumber, repoFull, trusted);
+
+  try {
+    oclAdapter.sendEvent(message);
+    ghAdapter.markThreadRead(notification.id);
+    log("pr_review_comment", message);
+  } catch (err) {
+    log("error", `Failed to send event or mark read: ${err.message}`);
+    // Release every lock we set so the batch is retried on the next poll.
+    for (const c of locked) {
+      try {
+        const reactions = ghAdapter.getPrReviewCommentReactions({
+          owner,
+          repo,
+          commentId: String(c.id),
+        });
+        const ours = reactions.find((r) => r.content === LOCK_REACTION);
+        if (ours) {
+          ghAdapter.removePrReviewCommentReaction({
+            owner,
+            repo,
+            commentId: String(c.id),
+            reactionId: ours.id,
+          });
+        }
+      } catch (releaseErr) {
+        log("error", `Failed to release lock ${c.id}: ${releaseErr.message}`);
+      }
+    }
+  }
+}
+
+/**
  * Main processing loop for one poll run.
  */
 function run(ghAdapter = gh, oclAdapter = openclaw) {
@@ -311,6 +458,19 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
         `Skipping unclassified notification with ID ${notification.id}`
       );
       ghAdapter.markThreadRead(notification.id);
+      continue;
+    }
+
+    // PR inline review comments arrive bundled under one notification
+    // (latest_comment_url is null for them). Handle the whole batch so we never
+    // drop all-but-the-newest comment (issue #8). Regular PR conversation
+    // comments carry a latest_comment_url and keep the single-comment path.
+    if (kind === "pr_review_comment" && !notification.subject?.latest_comment_url) {
+      try {
+        handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter);
+      } catch (err) {
+        log("error", `Failed to handle PR review batch: ${err.message}`);
+      }
       continue;
     }
 
@@ -391,9 +551,11 @@ module.exports = {
   classifyNotification,
   resolveActor,
   buildEventMessage,
+  buildPrReviewBatchMessage,
   buildWarningMessage,
   acquireLock,
   releaseLock,
+  handlePrReviewCommentBatch,
 };
 
 // Entry point when run directly
