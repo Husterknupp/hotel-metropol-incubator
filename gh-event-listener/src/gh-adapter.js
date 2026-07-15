@@ -111,6 +111,31 @@ function getPrReviewComments({ owner, repo, prNumber }) {
 }
 
 /**
+ * Returns the databaseIds (as strings) of all review comments that sit in a
+ * RESOLVED review thread. The REST comments endpoint has no resolved flag, so
+ * we ask GraphQL. Used to skip comments the reviewer has already resolved.
+ */
+function getResolvedReviewCommentIds({ owner, repo, prNumber }) {
+  const query =
+    `query($owner:String!,$repo:String!,$pr:Int!){` +
+    `repository(owner:$owner,name:$repo){pullRequest(number:$pr){` +
+    `reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId}}}}}}}`;
+  const data = ghJson(
+    `api graphql -f query='${query}' -F owner='${owner}' -F repo='${repo}' -F pr=${prNumber}`
+  );
+  const threads =
+    data?.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+  const ids = [];
+  for (const thread of threads) {
+    if (!thread.isResolved) continue;
+    for (const c of thread.comments?.nodes || []) {
+      if (c.databaseId != null) ids.push(String(c.databaseId));
+    }
+  }
+  return ids;
+}
+
+/**
  * Adds an emoji reaction to a PR review comment (inline diff comment).
  * Uses /pulls/comments/{id}/reactions — different from /issues/comments/{id}/reactions.
  */
@@ -201,6 +226,7 @@ module.exports = {
   removeIssueReaction,
   getLatestPrReviewComment,
   getPrReviewComments,
+  getResolvedReviewCommentIds,
   addPrReviewCommentReaction,
   removePrReviewCommentReaction,
   getPrReviewCommentReactions,

@@ -22,7 +22,14 @@ Das Script pollt die GitHub Notifications API und triggert den OpenClaw-Agenten 
 
 Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-Channel.
 
-**Batch-Handling für Inline-Review-Kommentare (Issue #8):** Ein abgeschickter Review bündelt mehrere Inline-Kommentare unter *einer* Notification. Für den Inline-Fall (`author` + `PullRequest` + `latest_comment_url=null`) holt der Listener daher **alle** Inline-Review-Kommentare (`/pulls/{n}/comments`), filtert pro Autor (eigene überspringen, bereits gelockte überspringen, fremde → Warnung + Lock, vertrauenswürdige → sammeln) und schickt **einen** Event, der alle offenen Kommentare auflistet. Die Notification wird erst als gelesen markiert, wenn alle bearbeitet sind — so geht kein Kommentar mehr verloren. Reguläre PR-Konversationskommentare (mit `latest_comment_url`) behalten den Einzel-Pfad.
+**Batch-Handling für Inline-Review-Kommentare (Issue #8):** Ein abgeschickter Review bündelt mehrere Inline-Kommentare unter *einer* Notification. Für den Inline-Fall (`author` + `PullRequest` + `latest_comment_url=null`) holt der Listener daher **alle** Inline-Review-Kommentare (`/pulls/{n}/comments`), filtert pro Kommentar und schickt **einen** Event, der alle offenen Kommentare auflistet. Filterregeln pro Kommentar:
+- eigener Bot-Account (`SELF_ACTOR`) → überspringen
+- Kommentar in einem **resolved** Review-Thread → überspringen (Resolven = „keine Antwort nötig", via GraphQL `reviewThreads.isResolved`)
+- bereits mit unserem 👀 gelockt → überspringen (schon bearbeitet)
+- vertrauenswürdiger Autor → für den Batch sammeln
+- Fremder → **Warnung, kein Lock** (das abschließende `markThreadRead` verhindert erneutes Warnen)
+
+Die Notification wird erst als gelesen markiert, wenn alle vertrauenswürdigen Kommentare gelockt und der Batch verschickt ist — so geht kein Kommentar mehr verloren. Reguläre PR-Konversationskommentare (mit `latest_comment_url`) behalten den Einzel-Pfad.
 
 **Happy-Path-Kanalregel:** Jede Event-Message (nicht die Warnung) enthält die Anweisung, ausführlich auf GitHub zu antworten und in Discord nur eine kurze Zusammenfassung mit Link zu posten (Token-Ersparnis).
 

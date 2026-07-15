@@ -312,9 +312,11 @@ function releaseLock(notification, lock, ghAdapter) {
  *
  * Per-comment rules:
  *   - authored by us (SELF_ACTOR)      → skip (our own replies must not loop)
+ *   - in a resolved review thread      → skip (resolving a thread means "done")
  *   - already carrying our lock 👀      → skip (already handled)
  *   - authored by the trusted actor    → collect for one batched event
- *   - anyone else                      → warn once, then lock so we don't re-warn
+ *   - anyone else                      → warn (no lock; the final markThreadRead
+ *                                        stops it re-surfacing)
  *
  * The notification thread is only marked read once every in-scope comment has
  * been locked and the batched event dispatched — so no comment is dropped.
@@ -333,11 +335,25 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
   const prNumber = subjectUrl.split("/").pop();
   const comments = ghAdapter.getPrReviewComments({ owner, repo, prNumber });
 
+  // Comments in a resolved review thread are considered handled — resolving a
+  // thread on GitHub is the reviewer's way of saying "no reply needed".
+  let resolvedIds = new Set();
+  try {
+    resolvedIds = new Set(
+      ghAdapter.getResolvedReviewCommentIds({ owner, repo, prNumber })
+    );
+  } catch (err) {
+    // Fail open: without resolved info we still rely on the per-comment lock to
+    // avoid double-processing, so proceed rather than block everything.
+    log("error", `Failed to fetch resolved threads: ${err.message}`);
+  }
+
   const trusted = [];
   const untrusted = [];
   for (const c of comments) {
     const author = c.user?.login;
     if (author === SELF_ACTOR) continue;
+    if (resolvedIds.has(String(c.id))) continue;
 
     const reactions = ghAdapter.getPrReviewCommentReactions({
       owner,
@@ -351,24 +367,14 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
     else untrusted.push({ comment: c, author });
   }
 
-  // Untrusted commenters: warn once, then lock the comment so the next poll
-  // doesn't warn about it again.
-  for (const { comment, author } of untrusted) {
+  // Untrusted commenters: warn only. No lock — the final markThreadRead keeps
+  // the thread from re-surfacing, so we won't re-warn.
+  for (const { author } of untrusted) {
     log("error", `Untrusted actor: ${author}`);
     try {
       oclAdapter.sendEvent(buildWarningMessage(author, repoFull));
     } catch (err) {
       log("error", `Failed to send warning: ${err.message}`);
-    }
-    try {
-      ghAdapter.addPrReviewCommentReaction({
-        owner,
-        repo,
-        commentId: String(comment.id),
-        content: LOCK_REACTION,
-      });
-    } catch (err) {
-      log("error", `Failed to lock untrusted comment ${comment.id}: ${err.message}`);
     }
   }
 

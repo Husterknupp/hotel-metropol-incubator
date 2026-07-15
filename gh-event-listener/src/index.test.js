@@ -49,6 +49,7 @@ function makeGhAdapter(overrides = {}) {
       user: { login: "Husterknupp" },
     }),
     getPrReviewComments: jest.fn().mockReturnValue([]),
+    getResolvedReviewCommentIds: jest.fn().mockReturnValue([]),
     addPrReviewCommentReaction: jest.fn(),
     removePrReviewCommentReaction: jest.fn(),
     getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
@@ -761,10 +762,10 @@ describe("run – PR review comment flow (happy path)", () => {
 
     // Exactly ONE agent event that names all four comments
     expect(oclAdapter.sendEvent).toHaveBeenCalledTimes(1);
-    const msg = oclAdapter.sendEvent.mock.calls[0][0];
-    expect(msg).toMatch(/React to 4 review comment\(s\)/);
+    const batchMsg = oclAdapter.sendEvent.mock.calls[0][0];
+    expect(batchMsg).toMatch(/React to 4 review comment\(s\)/);
     for (const id of [3582979691, 3583055321, 3583072147, 3583107478]) {
-      expect(msg).toContain(String(id));
+      expect(batchMsg).toContain(String(id));
     }
 
     // Thread only marked read after the batch was dispatched
@@ -805,7 +806,7 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(msg).not.toContain("111");
   });
 
-  test("issue #8: a stranger's inline comment in the batch → warning + lock, trusted ones still processed", () => {
+  test("issue #8: a stranger's inline comment in the batch → warning but NO lock; trusted ones still processed", () => {
     const inlineReviewNotif = makeNotification({
       reason: "author",
       subject: {
@@ -830,16 +831,51 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining("untrusted actor")
     );
-    // Both the stranger's comment (to stop re-warning) and the trusted one get locked
+    // Only the trusted comment gets locked — the stranger's comment is NOT locked
     const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
       (c) => c[0].commentId
     );
-    expect(lockedIds).toEqual(expect.arrayContaining(["111", "999"]));
+    expect(lockedIds).toEqual(["111"]);
+    expect(lockedIds).not.toContain("999");
     // The trusted comment is still handled in a batch event
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringMatching(/React to 1 review comment/)
     );
+    // Thread marked read at the end → stranger won't be re-warned
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
+  });
+
+  test("issue #8: comments in a resolved review thread are skipped", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 700, user: { login: "Husterknupp" }, body: "resolved, leave alone" },
+        { id: 800, user: { login: "Husterknupp" }, body: "still open" },
+      ]),
+      // 700 sits in a resolved thread
+      getResolvedReviewCommentIds: jest.fn().mockReturnValue(["700"]),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
+      (c) => c[0].commentId
+    );
+    expect(lockedIds).toEqual(["800"]);
+    const msg = oclAdapter.sendEvent.mock.calls[0][0];
+    expect(msg).toMatch(/React to 1 review comment/);
+    expect(msg).toContain("800");
+    expect(msg).not.toContain("700");
   });
 
   test("issue #8: sendEvent failure releases every lock so the batch retries", () => {
