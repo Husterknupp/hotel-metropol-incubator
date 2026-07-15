@@ -856,6 +856,45 @@ describe("run – untrusted actor", () => {
   });
 });
 
+// ── run: self-triggered event ────────────────────────────────────────────────
+
+describe("run – self-triggered event (our own bot)", () => {
+  test("our own comment → no warning, no lock, no event, thread marked read", () => {
+    // PR review comment authored by our own bot account (arostovd). This is the
+    // loop we hit on 2026-07-15: replying on a PR made us the latest commenter,
+    // the listener resolved arostovd as an actor, flagged it "untrusted" and
+    // warned every minute.
+    const notif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+      repository: { full_name: "Husterknupp/hotel-metropol-incubator" },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getLatestPrReviewComment: jest.fn().mockReturnValue({
+        id: 3583107478,
+        user: { login: "arostovd" },
+      }),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    // No warning and no agent trigger for our own activity
+    expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+    // No lock of any kind
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addIssueReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalled();
+    // But the notification must still be marked read so we don't loop on it
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
+  });
+});
+
 // ── run: OpenClaw sendEvent fails ────────────────────────────────────────────
 
 describe("run – OpenClaw sendEvent fails", () => {

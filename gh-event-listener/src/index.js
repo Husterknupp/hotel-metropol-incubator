@@ -4,6 +4,11 @@
 //
 // Environment / config:
 //   TRUSTED_ACTOR   GitHub username whose events should trigger the agent (default: Husterknupp)
+//   SELF_ACTOR      Our own bot's GitHub username. Events triggered by our own
+//                   comments/reactions must NOT warn or re-trigger the agent —
+//                   otherwise every reply we post spawns a fresh "untrusted
+//                   actor" notification and the listener feeds itself in a loop.
+//                   (default: arostovd)
 //   LOCK_REACTION   Emoji reaction used as a distributed lock (default: eyes)
 //   WARN_CHANNEL    (optional) Discord channel ID for third-party event warnings.
 //                   If not set, the warning goes to the agent's default channel.
@@ -20,6 +25,7 @@ const gh = require("./gh-adapter");
 const openclaw = require("./openclaw-adapter");
 
 const TRUSTED_ACTOR = process.env.TRUSTED_ACTOR || "Husterknupp";
+const SELF_ACTOR = process.env.SELF_ACTOR || "arostovd";
 const LOCK_REACTION = process.env.LOCK_REACTION || "eyes";
 const WARN_CHANNEL = process.env.WARN_CHANNEL || null;
 
@@ -303,6 +309,15 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
       actor = resolveActor(notification, ghAdapter);
     } catch (err) {
       log("error", `Failed to resolve actor: ${err.message}`);
+      ghAdapter.markThreadRead(notification.id);
+      continue;
+    }
+
+    // Self-triggered: our own bot's activity (e.g. a reply we just posted on a
+    // PR) shows up as a fresh notification. Do not warn and do not re-trigger
+    // the agent — just mark it read so we don't loop on our own comments.
+    if (actor === SELF_ACTOR) {
+      log("no_op", `Self-triggered event by ${SELF_ACTOR}, ignoring: ${notification.id}`);
       ghAdapter.markThreadRead(notification.id);
       continue;
     }
