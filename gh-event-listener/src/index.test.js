@@ -781,6 +781,79 @@ describe("run – untrusted actor", () => {
     expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
   });
+
+  test("stranger comments on OUR repo → warning names our repo, no lock, thread read", () => {
+    const notif = makeNotification({
+      reason: "mention",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/4242",
+      },
+      repository: { full_name: "Husterknupp/hotel-metropol-incubator" },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getActorFromUrl: jest.fn().mockReturnValue("DriveByStranger"),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("untrusted actor")
+    );
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("DriveByStranger")
+    );
+    // The warning must name our own repo so the owner sees where it happened
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("Husterknupp/hotel-metropol-incubator")
+    );
+    // No lock of any kind — even though the repo is ours, an untrusted actor
+    // must never cause us to react on the comment.
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addIssueReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
+  });
+
+  test("stranger opens an issue on OUR repo and assigns it to us → warning, no lock, thread read", () => {
+    const notif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/17",
+        // Genuine assignment: no comment yet, so latest_comment_url === subject.url
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/17",
+      },
+      repository: { full_name: "Husterknupp/hotel-metropol-incubator" },
+    });
+    // Genuine assignment → actor is resolved as the issue's creator (the stranger)
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getActorFromUrl: jest.fn().mockReturnValue("DriveByStranger"),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("untrusted actor")
+    );
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("DriveByStranger")
+    );
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("Husterknupp/hotel-metropol-incubator")
+    );
+    // A stranger-created issue must not be locked (no eyes reaction on the issue)
+    expect(ghAdapter.addIssueReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
+  });
 });
 
 // ── run: OpenClaw sendEvent fails ────────────────────────────────────────────
