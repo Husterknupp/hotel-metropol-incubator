@@ -1,0 +1,3 @@
+node_modules/
+.swp
+logs/gh-event-listener.log
