@@ -166,17 +166,24 @@ const CHANNEL_INSTRUCTION =
 function buildEventMessage(kind, notification) {
   const repoFull = notification.repository?.full_name;
   const number = notification.subject?.url?.split("/").pop();
+  // The notification payload already carries a direct API URL to the comment
+  // that triggered it. Passing it through spares the agent an expensive search
+  // to locate the right comment — no extra endpoint call needed.
+  const commentUrl = notification.subject?.latest_comment_url;
 
   let base;
   if (kind === "comment") {
     base = `React to ${TRUSTED_ACTOR}'s GitHub comment (repo ${repoFull})`;
+    if (commentUrl) base += ` at ${commentUrl}`;
   } else if (kind === "issue") {
     const type = notification.subject?.type || "Issue";
     base = `Work on ${type} #${number} (repo ${repoFull})`;
   } else if (kind === "pr") {
     base = `Review PR #${number} (repo ${repoFull})`;
   } else if (kind === "pr_review_comment") {
-    base = `React to a review comment on your PR #${number} (repo ${repoFull}). Do not @-mention anyone — this was triggered automatically.`;
+    base = `React to a review comment on your PR #${number} (repo ${repoFull})`;
+    if (commentUrl) base += ` at ${commentUrl}`;
+    base += `. Do not @-mention anyone — this was triggered automatically.`;
   } else {
     return null;
   }
@@ -193,7 +200,10 @@ function buildPrReviewBatchMessage(prNumber, repoFull, comments) {
   const list = comments
     .map((c) => {
       const body = (c.body || "").replace(/\s+/g, " ").trim().slice(0, 100);
-      return `- comment ${c.id}: ${body}`;
+      // Include the direct link so the agent goes straight to each comment
+      // instead of searching for it.
+      const url = c.html_url ? ` (${c.html_url})` : "";
+      return `- comment ${c.id}${url}: ${body}`;
     })
     .join("\n");
   return (

@@ -492,6 +492,13 @@ describe("buildEventMessage", () => {
     );
   });
 
+  test("comment message includes the direct comment URL from the payload", () => {
+    // Spares the agent an expensive search for the triggering comment.
+    expect(buildEventMessage("comment", notif)).toContain(
+      "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/comments/99"
+    );
+  });
+
   test("issue message includes Issue type and number", () => {
     const issueNotif = makeNotification({
       subject: {
