@@ -147,26 +147,37 @@ function parseRepo(notification) {
 }
 
 /**
+ * Instruction appended to every happy-path event message: the substantial
+ * answer goes on GitHub, Discord gets only a short summary. Keeps the agent
+ * from replying at full length in both places (token saving). Deliberately
+ * NOT added to the warning message — warnings stay as-is.
+ */
+const CHANNEL_INSTRUCTION =
+  " Reply on GitHub with the full answer; in Discord only post a short summary," +
+  " ideally with a link to the comment/issue/PR.";
+
+/**
  * Build the agent event message for a given notification.
  */
 function buildEventMessage(kind, notification) {
   const repoFull = notification.repository?.full_name;
   const number = notification.subject?.url?.split("/").pop();
 
+  let base;
   if (kind === "comment") {
-    return `React to ${TRUSTED_ACTOR}'s GitHub comment (repo ${repoFull})`;
-  }
-  if (kind === "issue") {
+    base = `React to ${TRUSTED_ACTOR}'s GitHub comment (repo ${repoFull})`;
+  } else if (kind === "issue") {
     const type = notification.subject?.type || "Issue";
-    return `Work on ${type} #${number} (repo ${repoFull})`;
+    base = `Work on ${type} #${number} (repo ${repoFull})`;
+  } else if (kind === "pr") {
+    base = `Review PR #${number} (repo ${repoFull})`;
+  } else if (kind === "pr_review_comment") {
+    base = `React to a review comment on your PR #${number} (repo ${repoFull}). Do not @-mention anyone — this was triggered automatically.`;
+  } else {
+    return null;
   }
-  if (kind === "pr") {
-    return `Review PR #${number} (repo ${repoFull})`;
-  }
-  if (kind === "pr_review_comment") {
-    return `React to a review comment on your PR #${number} (repo ${repoFull}). Do not @-mention anyone — this was triggered automatically.`;
-  }
-  return null;
+
+  return base + CHANNEL_INSTRUCTION;
 }
 
 /**
