@@ -57,7 +57,11 @@ function log(outcome, detail = "") {
 function isActuallyAComment(notification) {
   const subjectUrl = notification.subject?.url;
   const commentUrl = notification.subject?.latest_comment_url;
-  return Boolean(commentUrl) && commentUrl !== subjectUrl;
+  // No comment URL at all (missing/null) → there is nothing to comment on.
+  if (!commentUrl) return false;
+  // A genuine comment points at its own URL, distinct from the subject's URL
+  // (assignment/review-request events set the two equal).
+  return commentUrl !== subjectUrl;
 }
 
 /**
