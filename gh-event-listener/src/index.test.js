@@ -70,13 +70,13 @@ function makeOclAdapter(overrides = {}) {
 // ── classifyNotification ──────────────────────────────────────────────────────
 
 describe("classifyNotification", () => {
-  test("reason=mention → comment", () => {
+  test("reason=mention, subject=PullRequest (someone @-mentions us in a PR comment) → comment", () => {
     expect(
       classifyNotification(makeNotification({ reason: "mention" }))
     ).toBe("comment");
   });
 
-  test("reason=comment → comment (reply on thread we're already on)", () => {
+  test("reason=comment, subject=PullRequest (reply on a PR thread we're already on) → comment", () => {
     expect(
       classifyNotification(makeNotification({ reason: "comment" }))
     ).toBe("comment");

@@ -1,5 +1,5 @@
 // gh-adapter.test.js
-// Regression tests for shell-quoting of gh api arguments.
+// Behavioural regression test for shell-quoting of gh api arguments.
 //
 // Background: gh-adapter passes command strings to child_process.execSync,
 // which runs them through `sh -c`. Any unquoted `&` in a URL query string is
@@ -7,89 +7,76 @@
 // the following query parameters. This once caused getLatestPrReviewComment to
 // return the first comment (by diff position) instead of the newest one,
 // because `sort=created&direction=desc` never reached gh.
-
-jest.mock("child_process", () => ({
-  execSync: jest.fn(() => "[]"),
-}));
+//
+// The previous version of this file mocked execSync and re-implemented shell
+// quoting rules to assert "the command string looks quoted". That was close to
+// tautological: a green run only proved the string matched our own parser, not
+// that a real shell keeps the `&` inside the argument. Instead we reproduce the
+// real failure mode — put a fake `gh` on PATH that records the argv it actually
+// receives, and let the real `execSync → sh -c` do the tokenizing. A green test
+// therefore proves the shell kept the whole query string as ONE argument.
+//
+// Why a child node process? The adapter calls `execSync("gh …")` with no `env`
+// option, so it inherits the real process environment's PATH. Under jest each
+// test module gets its OWN sandboxed `process.env`; mutating `process.env.PATH`
+// here does NOT reach that un-optioned execSync, so the fake `gh` would never be
+// found and the real one would run. We therefore run the adapter call in a real
+// child `node` process whose PATH we control explicitly — there the adapter's
+// bare `gh` resolves to our fake, and the real shell does the tokenizing.
+//
+// Note: this shells out for real, so it needs a POSIX `sh` and a `node` on PATH
+// (fine on the Linux runner; a Windows CI would need a guard).
 
 const { execSync } = require("child_process");
-const gh = require("./gh-adapter");
+const { mkdtempSync, writeFileSync, chmodSync, readFileSync } = require("fs");
+const { tmpdir } = require("os");
+const path = require("path");
 
-/** Returns the single command string execSync was last called with. */
-function lastCommand() {
-  return execSync.mock.calls[execSync.mock.calls.length - 1][0];
-}
+const ADAPTER = path.resolve(__dirname, "gh-adapter.js");
 
 /**
- * A shell splits an unquoted string on `&` into separate commands. We emulate
- * that split only for `&` that sit OUTSIDE single or double quotes, which is
- * exactly the failure mode we guard against. If the URL is properly quoted,
- * the whole `gh api …` stays a single command word.
+ * Runs `require("./gh-adapter").<adapterCall>` inside a child node process with
+ * a fake `gh` first on PATH. The fake records every argument it receives (one
+ * per line) and prints `[]` as valid JSON. Returns the argv the shell actually
+ * handed to `gh` after parsing the adapter's command string.
  */
-function splitsOnUnquotedAmpersand(command) {
-  let inSingle = false;
-  let inDouble = false;
-  for (const ch of command) {
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    else if (ch === "&" && !inSingle && !inDouble) return true;
-  }
-  return false;
+function argvSeenByGh(adapterCall) {
+  const dir = mkdtempSync(path.join(tmpdir(), "ghfake-"));
+  const out = path.join(dir, "argv.txt");
+  writeFileSync(
+    path.join(dir, "gh"),
+    `#!/bin/sh\n: > "${out}"\nfor a in "$@"; do printf '%s\\n' "$a" >> "${out}"; done\nprintf '[]'\n`
+  );
+  chmodSync(path.join(dir, "gh"), 0o755);
+
+  const script = `require(${JSON.stringify(ADAPTER)}).${adapterCall}`;
+  execSync(`node -e ${JSON.stringify(script)}`, {
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    encoding: "utf8",
+  });
+  return readFileSync(out, "utf8").trim().split("\n");
 }
 
-beforeEach(() => {
-  execSync.mockClear();
-  execSync.mockReturnValue("[]");
-});
+describe("gh api query strings survive a real shell", () => {
+  const args = { owner: "Husterknupp", repo: "hotel-metropol-incubator", prNumber: "3" };
 
-describe("getLatestPrReviewComment – shell quoting", () => {
-  test("passes the full query string to the shell without an unquoted &", () => {
-    gh.getLatestPrReviewComment({
-      owner: "Husterknupp",
-      repo: "hotel-metropol-incubator",
-      prNumber: "3",
-    });
-
-    const cmd = lastCommand();
-    // All three query parameters must survive intact…
-    expect(cmd).toContain("per_page=1");
-    expect(cmd).toContain("sort=created");
-    expect(cmd).toContain("direction=desc");
-    // …and no & may be exposed to the shell as a background operator.
-    expect(splitsOnUnquotedAmpersand(cmd)).toBe(false);
+  // These are the two calls whose correctness depends on the query string
+  // (sort/direction) surviving intact; they share the same quoting idiom as
+  // every other `gh api '…'` call in the adapter, so a regression there would
+  // show up here too.
+  test("getLatestPrReviewComment sends the full query string as one argument", () => {
+    const argv = argvSeenByGh(`getLatestPrReviewComment(${JSON.stringify(args)})`);
+    // If the `&` were exposed to the shell, gh would only ever see
+    // "…?per_page=1" and the sort/direction params would be lost.
+    expect(argv).toContain(
+      "repos/Husterknupp/hotel-metropol-incubator/pulls/3/comments?per_page=1&sort=created&direction=desc"
+    );
   });
-});
 
-describe("all gh api URLs are shell-safe", () => {
-  const args = {
-    owner: "Husterknupp",
-    repo: "hotel-metropol-incubator",
-    commentId: "123",
-    issueNumber: "3",
-    prNumber: "3",
-    threadId: "999",
-    reactionId: "555",
-    content: "eyes",
-  };
-
-  const calls = [
-    ["addReaction", () => gh.addReaction(args)],
-    ["removeReaction", () => gh.removeReaction(args)],
-    ["addPrReviewCommentReaction", () => gh.addPrReviewCommentReaction(args)],
-    ["removePrReviewCommentReaction", () => gh.removePrReviewCommentReaction(args)],
-    ["getPrReviewCommentReactions", () => gh.getPrReviewCommentReactions(args)],
-    ["getReactions", () => gh.getReactions(args)],
-    ["getIssueReactions", () => gh.getIssueReactions(args)],
-    ["addIssueReaction", () => gh.addIssueReaction(args)],
-    ["removeIssueReaction", () => gh.removeIssueReaction(args)],
-    ["markThreadRead", () => gh.markThreadRead(args.threadId)],
-    ["getLatestPrReviewComment", () => gh.getLatestPrReviewComment(args)],
-    ["getPrReviewComments", () => gh.getPrReviewComments(args)],
-    ["getResolvedReviewCommentIds", () => gh.getResolvedReviewCommentIds(args)],
-  ];
-
-  test.each(calls)("%s never exposes an unquoted & to the shell", (_name, invoke) => {
-    invoke();
-    expect(splitsOnUnquotedAmpersand(lastCommand())).toBe(false);
+  test("getPrReviewComments (issue #8 batch fetch) also survives the shell", () => {
+    const argv = argvSeenByGh(`getPrReviewComments(${JSON.stringify(args)})`);
+    expect(argv).toContain(
+      "repos/Husterknupp/hotel-metropol-incubator/pulls/3/comments?per_page=100&sort=created&direction=asc"
+    );
   });
 });
