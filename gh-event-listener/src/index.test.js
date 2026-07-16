@@ -48,6 +48,13 @@ function makeGhAdapter(overrides = {}) {
       id: 9001,
       user: { login: "Husterknupp" },
     }),
+    getIssueTimeline: jest.fn().mockReturnValue([
+      {
+        event: "assigned",
+        actor: { login: "Husterknupp" },
+        assignee: { login: "arostovd" },
+      },
+    ]),
     getPrReviewComments: jest.fn().mockReturnValue([]),
     getResolvedReviewCommentIds: jest.fn().mockReturnValue([]),
     addPrReviewCommentReaction: jest.fn(),
@@ -368,23 +375,61 @@ describe("resolveActor", () => {
     );
   });
 
-  test("assign: fetches actor from subject URL (issue creator)", () => {
+  test("assign: resolves the ASSIGNER from the timeline, not the issue creator", () => {
     const notif = makeNotification({
       reason: "assign",
       subject: {
         type: "Issue",
         url: "https://api.github.com/repos/X/Y/issues/1",
-        latest_comment_url: null,
+        latest_comment_url:
+          "https://api.github.com/repos/X/Y/issues/1",
+      },
+      repository: { full_name: "X/Y" },
+    });
+    const ghAdapter = makeGhAdapter({
+      // Creator lookup would return this — it must NOT be used for assignments.
+      getActorFromUrl: jest.fn().mockReturnValue("arostovd"),
+      getIssueTimeline: jest.fn().mockReturnValue([
+        {
+          event: "assigned",
+          actor: { login: "Husterknupp" },
+          assignee: { login: "arostovd" },
+        },
+      ]),
+    });
+
+    // Actor is the assigner (Husterknupp), taken from the timeline.
+    expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
+    expect(ghAdapter.getIssueTimeline).toHaveBeenCalledWith({
+      owner: "X",
+      repo: "Y",
+      issueNumber: "1",
+    });
+    // The creator endpoint is not consulted for a genuine assignment.
+    expect(ghAdapter.getActorFromUrl).not.toHaveBeenCalled();
+  });
+
+  test("assign: picks the LAST assignment aimed at us (re-assign wins over earlier assign/unassign)", () => {
+    const notif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/X/Y/issues/1",
+        latest_comment_url:
+          "https://api.github.com/repos/X/Y/issues/1",
       },
     });
     const ghAdapter = makeGhAdapter({
-      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+      getIssueTimeline: jest.fn().mockReturnValue([
+        { event: "assigned", actor: { login: "SomeoneElse" }, assignee: { login: "arostovd" } },
+        { event: "unassigned", actor: { login: "SomeoneElse" }, assignee: { login: "arostovd" } },
+        { event: "assigned", actor: { login: "Husterknupp" }, assignee: { login: "arostovd" } },
+        // An assignment of a DIFFERENT user must be ignored.
+        { event: "assigned", actor: { login: "Intruder" }, assignee: { login: "somedev" } },
+      ]),
     });
 
     expect(resolveActor(notif, ghAdapter)).toBe("Husterknupp");
-    expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
-      "https://api.github.com/repos/X/Y/issues/1"
-    );
   });
 
   test("assign but actually a comment: fetches actor from the comment, not the issue creator", () => {
@@ -601,7 +646,7 @@ describe("run – comment flow (happy path)", () => {
 // ── run: issue assignment flow ───────────────────────────────────────────────
 
 describe("run – issue assignment flow (happy path)", () => {
-  test("resolves actor from issue, locks, sends event, marks thread read", () => {
+  test("resolves the assigner from the timeline, locks, sends event, marks thread read", () => {
     const issueNotif = makeNotification({
       reason: "assign",
       subject: {
@@ -613,22 +658,64 @@ describe("run – issue assignment flow (happy path)", () => {
     });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([issueNotif]),
-      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+      getIssueTimeline: jest.fn().mockReturnValue([
+        {
+          event: "assigned",
+          actor: { login: "Husterknupp" },
+          assignee: { login: "arostovd" },
+        },
+      ]),
     });
     const oclAdapter = makeOclAdapter();
 
     run(ghAdapter, oclAdapter);
 
-    // Actor resolved from subject URL (issue)
-    expect(ghAdapter.getActorFromUrl).toHaveBeenCalledWith(
-      "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/issues/1"
-    );
+    // Actor (assigner) resolved from the timeline, not the issue creator
+    expect(ghAdapter.getIssueTimeline).toHaveBeenCalledWith({
+      owner: "Husterknupp",
+      repo: "hotel-metropol-incubator",
+      issueNumber: "1",
+    });
     // Locked on the issue itself, not a (nonexistent) comment
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining("Work on Issue #1")
     );
+    expect(ghAdapter.markThreadRead).toHaveBeenCalled();
+  });
+
+  // Regression — the trigger that started all this. We authored the issue, so
+  // the OLD creator-based resolver returned SELF_ACTOR and the assignment was
+  // dropped as "self-triggered". With the assigner taken from the timeline
+  // (Husterknupp = trusted), the assignment must fire even though we created it.
+  test("regression: self-authored issue assigned to us by the trusted owner still fires", () => {
+    const issueNotif = makeNotification({
+      reason: "assign",
+      subject: {
+        type: "Issue",
+        url: "https://api.github.com/repos/Husterknupp/party-insights-shenanigans/issues/48",
+        latest_comment_url:
+          "https://api.github.com/repos/Husterknupp/party-insights-shenanigans/issues/48",
+      },
+      repository: { full_name: "Husterknupp/party-insights-shenanigans" },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([issueNotif]),
+      // Creator == SELF_ACTOR: this is exactly what used to trip the gate.
+      getActorFromUrl: jest.fn().mockReturnValue("arostovd"),
+      getIssueTimeline: jest.fn().mockReturnValue([
+        { event: "assigned", actor: { login: "Husterknupp" }, assignee: { login: "arostovd" } },
+      ]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining("Work on Issue #48")
+    );
+    expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
 });
@@ -1052,10 +1139,17 @@ describe("run – untrusted actor", () => {
       },
       repository: { full_name: "Husterknupp/hotel-metropol-incubator" },
     });
-    // Genuine assignment → actor is resolved as the issue's creator (the stranger)
+    // Genuine assignment → actor is the ASSIGNER from the timeline (the
+    // stranger assigned us), which is not the trusted actor → warn, don't act.
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
-      getActorFromUrl: jest.fn().mockReturnValue("DriveByStranger"),
+      getIssueTimeline: jest.fn().mockReturnValue([
+        {
+          event: "assigned",
+          actor: { login: "DriveByStranger" },
+          assignee: { login: "arostovd" },
+        },
+      ]),
     });
     const oclAdapter = makeOclAdapter();
 

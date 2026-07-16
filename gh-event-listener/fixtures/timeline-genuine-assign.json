@@ -1,0 +1,23 @@
+[
+  {
+    "id": 28052966519,
+    "event": "assigned",
+    "created_at": "2026-07-16T05:53:28Z",
+    "actor": { "login": "Husterknupp" },
+    "assignee": { "login": "arostovd" }
+  },
+  {
+    "id": 28074724726,
+    "event": "unassigned",
+    "created_at": "2026-07-16T14:24:29Z",
+    "actor": { "login": "Husterknupp" },
+    "assignee": { "login": "arostovd" }
+  },
+  {
+    "id": 28081175927,
+    "event": "assigned",
+    "created_at": "2026-07-16T16:36:00Z",
+    "actor": { "login": "Husterknupp" },
+    "assignee": { "login": "arostovd" }
+  }
+]
