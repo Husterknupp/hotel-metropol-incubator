@@ -157,8 +157,8 @@ function parseRepo(notification) {
  * NOT added to the warning message — warnings stay as-is.
  */
 const CHANNEL_INSTRUCTION =
-  " Reply on GitHub with the full answer; in Discord only post a short summary," +
-  " ideally with a link to the comment/issue/PR.";
+  " Reply on GitHub with the full answer, in English; in Discord only post a short summary," +
+  " in German, ideally with a link to the comment/issue/PR.";
 
 /**
  * Build the agent event message for a given notification.
