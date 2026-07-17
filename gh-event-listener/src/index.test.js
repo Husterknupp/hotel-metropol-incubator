@@ -541,7 +541,9 @@ describe("buildEventMessage", () => {
     ]) {
       const msg = buildEventMessage(kind, n);
       expect(msg).toMatch(/Reply on GitHub/);
+      expect(msg).toMatch(/full answer, in English/);
       expect(msg).toMatch(/Discord only post a short summary/);
+      expect(msg).toMatch(/short summary,\s*in German/);
     }
   });
 
