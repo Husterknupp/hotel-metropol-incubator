@@ -407,8 +407,10 @@ function releaseLock(notification, lock, ghAdapter) {
  *   - in a resolved review thread      → skip (resolving a thread means "done")
  *   - already carrying our lock 👀      → skip (already handled)
  *   - authored by the trusted actor    → collect for one batched event
- *   - anyone else                      → warn (no lock; the final markThreadRead
- *                                        stops it re-surfacing)
+ *   - anyone else                      → warn once, then lock 👀 too — otherwise
+ *                                        new activity on the PR resurfaces this
+ *                                        notification thread and re-warns about
+ *                                        the same stranger comment every time
  *
  * The notification thread is only marked read once every in-scope comment has
  * been locked and the batched event dispatched — so no comment is dropped.
@@ -459,14 +461,24 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
     else untrusted.push({ comment: c, author });
   }
 
-  // Untrusted commenters: warn only. No lock — the final markThreadRead keeps
-  // the thread from re-surfacing, so we won't re-warn.
-  for (const { author } of untrusted) {
+  // Untrusted commenters: warn, then lock the same way as trusted comments so
+  // this specific comment is never re-warned about again.
+  for (const { comment, author } of untrusted) {
     log("error", `Untrusted actor: ${author}`);
     try {
       oclAdapter.sendEvent(buildWarningMessage(author, repoFull));
     } catch (err) {
       log("error", `Failed to send warning: ${err.message}`);
+    }
+    try {
+      ghAdapter.addPrReviewCommentReaction({
+        owner,
+        repo,
+        commentId: String(comment.id),
+        content: LOCK_REACTION,
+      });
+    } catch (err) {
+      log("error", `Failed to lock comment ${comment.id}: ${err.message}`);
     }
   }
 
