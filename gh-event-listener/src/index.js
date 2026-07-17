@@ -152,12 +152,12 @@ function parseRepo(notification) {
 
 /**
  * Instruction appended to every happy-path event message: the substantial
- * answer goes on GitHub, Discord gets only a short summary. Keeps the agent
+ * answer goes on GitHub, Discord gets only a two-line summary. Keeps the agent
  * from replying at full length in both places (token saving). Deliberately
  * NOT added to the warning message — warnings stay as-is.
  */
 const CHANNEL_INSTRUCTION =
-  " Reply on GitHub with the full answer, in English; in Discord only post a short summary," +
+  " Reply on GitHub with the full answer, in English; in Discord only post a two-liner summary," +
   " in German, ideally with a link to the comment/issue/PR.";
 
 /**

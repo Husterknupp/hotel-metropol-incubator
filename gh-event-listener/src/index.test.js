@@ -542,15 +542,15 @@ describe("buildEventMessage", () => {
       const msg = buildEventMessage(kind, n);
       expect(msg).toMatch(/Reply on GitHub/);
       expect(msg).toMatch(/full answer, in English/);
-      expect(msg).toMatch(/Discord only post a short summary/);
-      expect(msg).toMatch(/short summary,\s*in German/);
+      expect(msg).toMatch(/Discord only post a two-liner summary/);
+      expect(msg).toMatch(/two-liner summary,\s*in German/);
     }
   });
 
   test("the channel instruction is NOT part of the untrusted-actor warning", () => {
     const warning = buildWarningMessage("SomeStranger", "Husterknupp/repo");
     expect(warning).not.toMatch(/Reply on GitHub/);
-    expect(warning).not.toMatch(/short summary/);
+    expect(warning).not.toMatch(/two-liner summary/);
   });
 });
 
