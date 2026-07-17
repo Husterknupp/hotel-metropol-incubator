@@ -91,3 +91,45 @@ gh api "notifications?all=true&per_page=50" --jq '.[] | select(.repository.full_
 gh api "repos/Husterknupp/party-insights-shenanigans/issues/54/comments?per_page=100&sort=created&direction=desc" --jq '.[0].id'
 # ^ still returns the OLDEST comment — sort/direction are ignored here.
 ```
+
+## `stale-mention-inline-review/`
+
+Recorded on **2026-07-17**, a few hours after `stale-mention/` above, from the
+*same* notification thread (`24642770656`) bumping again — but this time the
+bump was a genuine new event: Husterknupp submitted a PR review on
+`party-insights-shenanigans#54` containing one inline comment on `.gitignore`
+(review `#4719555720`, review body itself empty — the actual content lives on
+the inline comment).
+
+### The flow
+
+| Step | Endpoint | File | Key insight |
+|------|----------|------|-------------|
+| 1 | `GET /notifications` | `notification.json` | Same shape as `stale-mention/`: `reason: "mention"`, `subject.latest_comment_url: null` — indistinguishable from a stale echo by the notification alone |
+| 2 | `GET /repos/{o}/{r}/issues/{n}/comments?per_page=100` | `issue-comments.json` | Identical to `stale-mention/comments.json` — nothing new here, latest is still our own reply from the day before |
+| 3 | `GET /repos/{o}/{r}/pulls/{n}/comments?per_page=1&sort=created&direction=desc` | `review-comments.json` | The *real* new activity: `Husterknupp`'s inline review comment, newer than anything in step 2 |
+
+### Why this matters
+
+The first fix for `stale-mention/` (see above) only checked general
+conversation comments (step 2) when `latest_comment_url` was missing. Applied
+live to this exact notification, it silently resolved the actor to `arostovd`
+(our own older conversation reply) and logged `"Self-triggered event by
+arostovd, ignoring"` — dropping Husterknupp's real review feedback without a
+trace, no warning, no reply. Worse than the original bug: at least the
+`Untrusted actor: unknown` warning was visible.
+
+The corrected fallback checks **both** comment streams — general conversation
+(`/issues/{n}/comments`) and inline review comments
+(`/pulls/{n}/comments`) — and picks whichever candidate has the newer
+`created_at`. Here that's the review comment, resolving correctly to
+`Husterknupp`.
+
+### Reproducing
+
+```bash
+gh api "repos/Husterknupp/party-insights-shenanigans/pulls/54/reviews" --jq '.[] | select(.id==4719555720)'
+gh api "repos/Husterknupp/party-insights-shenanigans/pulls/54/comments" --jq '.[] | select(.pull_request_review_id==4719555720)'
+gh api "repos/Husterknupp/party-insights-shenanigans/pulls/54/comments?per_page=10&sort=created&direction=desc"
+# ^ unlike issues/{n}/comments, this one DOES honor sort/direction correctly.
+```

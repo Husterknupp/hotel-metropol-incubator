@@ -24,6 +24,8 @@ function makeBaseGhAdapter(overrides = {}) {
     getActorFromUrl: jest.fn(),
     getLatestIssueComment: jest.fn(),
     getLatestPrReviewComment: jest.fn(),
+    getPrReviewComments: jest.fn().mockReturnValue([]),
+    getResolvedReviewCommentIds: jest.fn().mockReturnValue([]),
     addReaction: jest.fn(),
     removeReaction: jest.fn(),
     markThreadRead: jest.fn(),
@@ -31,6 +33,9 @@ function makeBaseGhAdapter(overrides = {}) {
     getIssueReactions: jest.fn().mockReturnValue([]),
     addIssueReaction: jest.fn(),
     removeIssueReaction: jest.fn(),
+    getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    addPrReviewCommentReaction: jest.fn(),
+    removePrReviewCommentReaction: jest.fn(),
     ...overrides,
   };
 }
@@ -144,6 +149,60 @@ describe("contract: recorded GitHub responses for a stale mention re-notificatio
     run(ghAdapter, oclAdapter);
 
     expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notification.id);
+  });
+});
+
+describe("contract: recorded GitHub responses for a genuine inline review comment behind a stale mention", () => {
+  // Same notification thread as "stale-mention" above (same thread ID,
+  // updated_at bumped again later) — but this time the bump really was a new
+  // comment: a genuine inline PR review comment from Husterknupp, which the
+  // conversation-only fallback above would miss entirely because it lives on
+  // a different endpoint (/pulls/{n}/comments, not /issues/{n}/comments).
+  const notification = load("stale-mention-inline-review", "notification.json");
+  const issueComments = load("stale-mention-inline-review", "issue-comments.json");
+  const reviewComments = load("stale-mention-inline-review", "review-comments.json");
+
+  function makeRecordedGhAdapter(overrides = {}) {
+    return makeBaseGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notification]),
+      getLatestIssueComment: jest.fn().mockReturnValue(
+        issueComments[issueComments.length - 1]
+      ),
+      // /pulls/{n}/comments (unlike /issues/{n}/comments) correctly honors
+      // sort=created&direction=desc, so the real adapter call already
+      // returns the newest comment first — reviewComments[0] here.
+      getLatestPrReviewComment: jest.fn().mockReturnValue(reviewComments[0]),
+      ...overrides,
+    });
+  }
+
+  test("the crux: the genuine new comment is an inline review comment, newer than the stale conversation reply", () => {
+    expect(reviewComments[0].user.login).toBe("Husterknupp");
+    expect(new Date(reviewComments[0].created_at).getTime()).toBeGreaterThan(
+      new Date(issueComments[issueComments.length - 1].created_at).getTime()
+    );
+  });
+
+  test("resolveActor picks the trusted owner's inline review comment, not the stale self-echo", () => {
+    const ghAdapter = makeRecordedGhAdapter();
+    // Before this fix, resolveActor only ever checked getLatestIssueComment
+    // and returned "arostovd" (our own older conversation reply) here,
+    // silently dropping Husterknupp's real review feedback.
+    expect(resolveActor(notification, ghAdapter)).toBe("Husterknupp");
+  });
+
+  test("end-to-end run() fires a comment-reaction event for the trusted owner's review comment", () => {
+    const ghAdapter = makeRecordedGhAdapter();
+    const oclAdapter = { sendEvent: jest.fn() };
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "React to Husterknupp's GitHub comment (repo Husterknupp/party-insights-shenanigans)"
+      )
+    );
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notification.id);
   });
 });
