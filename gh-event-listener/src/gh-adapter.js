@@ -97,6 +97,22 @@ function getLatestPrReviewComment({ owner, repo, prNumber }) {
 }
 
 /**
+ * Returns the issue/PR timeline (assignments, review requests, comments, …),
+ * oldest first. PRs share the issues timeline endpoint. Used to find who
+ * ASSIGNED us — the notification payload only exposes the subject's creator,
+ * which is a different person whenever we file our own tickets.
+ * Capped at 100 events (one page); the resolver reads the latest matching
+ * event, so only issues with >100 timeline entries before the final assignment
+ * would miss it.
+ */
+function getIssueTimeline({ owner, repo, issueNumber }) {
+  const events = ghJson(
+    `api 'repos/${owner}/${repo}/issues/${issueNumber}/timeline?per_page=100'`
+  );
+  return Array.isArray(events) ? events : [];
+}
+
+/**
  * Returns ALL inline review comments for a pull request, oldest first.
  * A submitted review bundles many inline comments under one notification, so we
  * need the full list to process every one (issue #8), not just the newest.
@@ -225,6 +241,7 @@ module.exports = {
   addIssueReaction,
   removeIssueReaction,
   getLatestPrReviewComment,
+  getIssueTimeline,
   getPrReviewComments,
   getResolvedReviewCommentIds,
   addPrReviewCommentReaction,

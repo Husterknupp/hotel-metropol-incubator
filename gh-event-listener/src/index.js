@@ -132,13 +132,53 @@ function resolveActor(notification, ghAdapter) {
     if (isActuallyAComment(notification)) {
       return ghAdapter.getActorFromUrl(commentUrl);
     }
-    // Genuine assignment/review request: actor is the subject creator
+    // Genuine assignment: the trigger is whoever ASSIGNED us, resolved from the
+    // issue/PR timeline — NOT the subject's creator. We routinely file our own
+    // tickets, so the creator is frequently SELF_ACTOR; using it made a real
+    // assignment by the trusted owner look self-triggered and get dropped.
+    // Contract fixtures: fixtures/*.json (recorded 2026-07-16, issue #48).
+    if (reason === "assign") {
+      return resolveAssigner(notification, ghAdapter);
+    }
+    // review_requested: still resolved from the PR creator. GitHub only lets
+    // repo collaborators request reviews and forbids requesting the PR author,
+    // so the SELF_ACTOR misfire above cannot occur here. The weaker residual
+    // case (a trusted collaborator requesting review on a fork PR authored by an
+    // outsider → a false "untrusted" warning) is left until we can record a real
+    // review_requested response to build against, rather than guess its shape.
     if (subjectUrl) {
       return ghAdapter.getActorFromUrl(subjectUrl);
     }
   }
 
   return null;
+}
+
+/**
+ * Resolve who assigned us, from the issue/PR timeline. Returns the actor.login
+ * of the most recent `assigned` event that targets SELF_ACTOR, or null.
+ *
+ * The notifications payload carries no actor and no assigner — only subject.url,
+ * whose creator is unrelated to who did the assigning. The timeline is the only
+ * place the assigner is recorded. See fixtures/README.md for the recorded flow.
+ */
+function resolveAssigner(notification, ghAdapter) {
+  const { owner, repo } = parseRepo(notification);
+  const issueNumber = notification.subject?.url?.split("/").pop();
+  if (!owner || !repo || !issueNumber) return null;
+
+  const timeline = ghAdapter.getIssueTimeline({ owner, repo, issueNumber });
+  if (!Array.isArray(timeline)) return null;
+
+  // Walk oldest→newest and keep the last `assigned` event aimed at us, so a
+  // re-assignment wins over an earlier one (and any unassign in between).
+  let assigner = null;
+  for (const ev of timeline) {
+    if (ev.event === "assigned" && ev.assignee?.login === SELF_ACTOR) {
+      assigner = ev.actor?.login ?? null;
+    }
+  }
+  return assigner;
 }
 
 /**
