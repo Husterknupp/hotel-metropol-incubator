@@ -108,8 +108,24 @@ function resolveActor(notification, ghAdapter) {
   const reason = notification.reason;
 
   // For mentions and replies on threads we're on: actor is the comment author
-  if ((reason === "mention" || reason === "comment") && commentUrl) {
-    return ghAdapter.getActorFromUrl(commentUrl);
+  if (reason === "mention" || reason === "comment") {
+    if (commentUrl) {
+      return ghAdapter.getActorFromUrl(commentUrl);
+    }
+    // Fallback: GitHub can bump a "mention"/"comment" thread's updated_at
+    // (unread again) from unrelated activity on the same subject — e.g. a CI
+    // check run — without repopulating latest_comment_url. Falling straight
+    // through to null here misreads a stale re-notification as an untrusted
+    // actor, even though the real mention was already handled hours earlier.
+    // Fetch the actual latest comment instead of giving up.
+    // Fixtures: fixtures/stale-mention/ (recorded 2026-07-17,
+    // party-insights-shenanigans#54).
+    if (subjectUrl) {
+      const { owner, repo } = parseRepo(notification);
+      const issueNumber = subjectUrl.split("/").pop();
+      const latest = ghAdapter.getLatestIssueComment({ owner, repo, issueNumber });
+      return latest ? latest.user.login : null;
+    }
   }
 
   if (reason === "author") {

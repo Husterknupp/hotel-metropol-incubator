@@ -1,11 +1,8 @@
 // contract.test.js
 // Pins the listener's behaviour to REAL, recorded GitHub API responses instead
-// of hand-authored assumptions. The fixtures under ../fixtures were captured on
-// 2026-07-16 from a genuine assignment of issue
-// Husterknupp/party-insights-shenanigans#48 to arostovd by Husterknupp.
-//
-// See fixtures/README.md for how each file was recorded and why the flow needs
-// three endpoints (notifications → timeline → subject).
+// of hand-authored assumptions. One folder per use case under ../fixtures, one
+// describe block per case here. See fixtures/README.md for how each case was
+// recorded and why it matters.
 
 const fs = require("fs");
 const path = require("path");
@@ -17,21 +14,16 @@ const {
 } = require("./index");
 
 const FIXTURES = path.join(__dirname, "..", "fixtures");
-const load = (name) =>
-  JSON.parse(fs.readFileSync(path.join(FIXTURES, name), "utf8"));
+const load = (caseName, file) =>
+  JSON.parse(fs.readFileSync(path.join(FIXTURES, caseName, file), "utf8"));
 
-const notification = load("notification-genuine-assign.json");
-const timeline = load("timeline-genuine-assign.json");
-const issueSubject = load("issue-subject.json");
-
-// Mirror the run() adapter surface, backed by the recorded responses.
-function makeRecordedGhAdapter(overrides = {}) {
+function makeBaseGhAdapter(overrides = {}) {
   return {
-    getNotifications: jest.fn().mockReturnValue([notification]),
-    getIssueTimeline: jest.fn().mockReturnValue(timeline),
-    // If anything reaches for the creator, it would get arostovd (== SELF_ACTOR)
-    // — the exact value that used to break the flow. It must NOT be consulted.
-    getActorFromUrl: jest.fn().mockReturnValue(issueSubject.user.login),
+    getNotifications: jest.fn().mockReturnValue([]),
+    getIssueTimeline: jest.fn(),
+    getActorFromUrl: jest.fn(),
+    getLatestIssueComment: jest.fn(),
+    getLatestPrReviewComment: jest.fn(),
     addReaction: jest.fn(),
     removeReaction: jest.fn(),
     markThreadRead: jest.fn(),
@@ -44,6 +36,22 @@ function makeRecordedGhAdapter(overrides = {}) {
 }
 
 describe("contract: recorded GitHub responses for a genuine assignment", () => {
+  const notification = load("genuine-assign", "notification.json");
+  const timeline = load("genuine-assign", "timeline.json");
+  const issueSubject = load("genuine-assign", "issue-subject.json");
+
+  // Mirror the run() adapter surface, backed by the recorded responses.
+  function makeRecordedGhAdapter(overrides = {}) {
+    return makeBaseGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notification]),
+      getIssueTimeline: jest.fn().mockReturnValue(timeline),
+      // If anything reaches for the creator, it would get arostovd (== SELF_ACTOR)
+      // — the exact value that used to break the flow. It must NOT be consulted.
+      getActorFromUrl: jest.fn().mockReturnValue(issueSubject.user.login),
+      ...overrides,
+    });
+  }
+
   test("the recorded notification really is a genuine assignment (not a comment)", () => {
     // This is the property the whole flow hinges on: for a genuine assignment
     // GitHub sets latest_comment_url === subject.url.
@@ -83,5 +91,59 @@ describe("contract: recorded GitHub responses for a genuine assignment", () => {
     );
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
+  });
+});
+
+describe("contract: recorded GitHub responses for a stale mention re-notification", () => {
+  const notification = load("stale-mention", "notification.json");
+  const comments = load("stale-mention", "comments.json");
+
+  function makeRecordedGhAdapter(overrides = {}) {
+    return makeBaseGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notification]),
+      getLatestIssueComment: jest.fn().mockReturnValue(
+        comments[comments.length - 1]
+      ),
+      ...overrides,
+    });
+  }
+
+  test("the recorded notification is a mention with no comment to follow directly", () => {
+    expect(notification.reason).toBe("mention");
+    expect(notification.subject.latest_comment_url).toBeNull();
+    expect(classifyNotification(notification)).toBe("comment");
+  });
+
+  test("the crux: the comments endpoint ignores sort/direction and returns oldest-first", () => {
+    // The real last comment (highest created_at) sits at the END of the array,
+    // not the start — even though a naive reading of `sort=created&direction=desc`
+    // would expect the opposite.
+    const sortedByCreatedAtDesc = [...comments].sort(
+      (a, b) => new Date(b.created_at) - new Date(a.created_at)
+    );
+    expect(comments[comments.length - 1]).toEqual(sortedByCreatedAtDesc[0]);
+    expect(comments[0]).not.toEqual(sortedByCreatedAtDesc[0]);
+  });
+
+  test("resolveActor falls back to the true latest comment instead of returning null", () => {
+    const ghAdapter = makeRecordedGhAdapter();
+    // Before the fix this returned null (logged as "Untrusted actor: unknown"),
+    // even though the thread's real latest activity is our own reply.
+    expect(resolveActor(notification, ghAdapter)).toBe("arostovd");
+    expect(ghAdapter.getLatestIssueComment).toHaveBeenCalledWith({
+      owner: "Husterknupp",
+      repo: "party-insights-shenanigans",
+      issueNumber: "54",
+    });
+  });
+
+  test("end-to-end run() recognizes the echo as self-triggered and does not warn", () => {
+    const ghAdapter = makeRecordedGhAdapter();
+    const oclAdapter = { sendEvent: jest.fn() };
+
+    run(ghAdapter, oclAdapter);
+
+    expect(oclAdapter.sendEvent).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notification.id);
   });
 });
