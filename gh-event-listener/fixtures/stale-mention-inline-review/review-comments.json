@@ -1,0 +1,17 @@
+[
+  {
+    "id": 3600574876,
+    "created_at": "2026-07-17T05:29:04Z",
+    "path": ".gitignore",
+    "pull_request_review_id": 4719555720,
+    "user": { "login": "Husterknupp" },
+    "body": "(second try)\n\nEventually we should track the spot files, just as we track json and md. Or do you see a reason not to? Including images, the files will be a few MBs, but not more than 100mb. That should be okay.\n\nWhen do we start tracking? ,maybe when we build the CI part because then the checked File will probably be kept up to date. Please add a to-do in that issue\n\nThen, the export should also automatically happen next to the other two exports in the npm start script"
+  },
+  {
+    "id": 3598532923,
+    "created_at": "2026-07-16T19:59:13Z",
+    "path": "src/ankiExport.res",
+    "pull_request_review_id": 4717238768,
+    "user": { "login": "coderabbitai[bot]" }
+  }
+]

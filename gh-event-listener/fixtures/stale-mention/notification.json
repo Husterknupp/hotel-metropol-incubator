@@ -1,0 +1,15 @@
+{
+  "id": "24642770656",
+  "reason": "mention",
+  "unread": false,
+  "updated_at": "2026-07-17T05:30:12Z",
+  "subject": {
+    "title": "MVP: export a JSON output file to a text-only .apkg deck",
+    "type": "PullRequest",
+    "url": "https://api.github.com/repos/Husterknupp/party-insights-shenanigans/pulls/54",
+    "latest_comment_url": null
+  },
+  "repository": {
+    "full_name": "Husterknupp/party-insights-shenanigans"
+  }
+}

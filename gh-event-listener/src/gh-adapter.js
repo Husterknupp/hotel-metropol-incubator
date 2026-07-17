@@ -97,6 +97,26 @@ function getLatestPrReviewComment({ owner, repo, prNumber }) {
 }
 
 /**
+ * Returns the most recent general conversation comment on an issue/PR.
+ * PRs share the issues comments endpoint for their Conversation-tab comments
+ * (distinct from /pulls/comments, which is inline review comments only).
+ *
+ * Unlike /pulls/{n}/comments, this endpoint ignores `sort`/`direction` and
+ * always returns oldest-first regardless of the params passed (verified
+ * against the live API 2026-07-17, see fixtures/stale-mention/) — so we fetch
+ * the page and take the last element instead of asking the API to sort desc.
+ * Capped at 100 (one page), same tradeoff as getPrReviewComments.
+ */
+function getLatestIssueComment({ owner, repo, issueNumber }) {
+  const comments = ghJson(
+    `api 'repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100'`
+  );
+  return Array.isArray(comments) && comments.length > 0
+    ? comments[comments.length - 1]
+    : null;
+}
+
+/**
  * Returns the issue/PR timeline (assignments, review requests, comments, …),
  * oldest first. PRs share the issues timeline endpoint. Used to find who
  * ASSIGNED us — the notification payload only exposes the subject's creator,
@@ -241,6 +261,7 @@ module.exports = {
   addIssueReaction,
   removeIssueReaction,
   getLatestPrReviewComment,
+  getLatestIssueComment,
   getIssueTimeline,
   getPrReviewComments,
   getResolvedReviewCommentIds,

@@ -108,8 +108,46 @@ function resolveActor(notification, ghAdapter) {
   const reason = notification.reason;
 
   // For mentions and replies on threads we're on: actor is the comment author
-  if ((reason === "mention" || reason === "comment") && commentUrl) {
-    return ghAdapter.getActorFromUrl(commentUrl);
+  if (reason === "mention" || reason === "comment") {
+    if (commentUrl) {
+      return ghAdapter.getActorFromUrl(commentUrl);
+    }
+    // Fallback: GitHub can bump a "mention"/"comment" thread's updated_at
+    // (unread again) without repopulating latest_comment_url — either from
+    // unrelated activity (e.g. a CI check run) on a stale, already-handled
+    // thread, or from a genuine NEW comment GitHub just didn't attach a
+    // direct URL for. Falling straight through to null here misreads either
+    // case as an untrusted actor.
+    //
+    // A PR has two independent comment streams, and either can be the real
+    // trigger: general conversation (/issues/{n}/comments) and inline review
+    // comments (/pulls/{n}/comments). An earlier version of this fallback
+    // only checked the former, which silently dropped a genuine inline
+    // review comment from the trusted owner — it resolved to our own older
+    // conversation reply and got misread as a self-triggered echo instead.
+    // Fetch both and let the truly newest (by created_at) win.
+    // Fixtures: fixtures/stale-mention/ (CI-bump on an already-handled
+    // thread) and fixtures/stale-mention-inline-review/ (genuine new inline
+    // review comment), both recorded 2026-07-17 on
+    // party-insights-shenanigans#54.
+    if (subjectUrl) {
+      const { owner, repo } = parseRepo(notification);
+      const issueNumber = subjectUrl.split("/").pop();
+      const candidates = [];
+      const latestIssueComment = ghAdapter.getLatestIssueComment({ owner, repo, issueNumber });
+      if (latestIssueComment) candidates.push(latestIssueComment);
+      if (notification.subject?.type === "PullRequest") {
+        const latestReviewComment = ghAdapter.getLatestPrReviewComment({
+          owner,
+          repo,
+          prNumber: issueNumber,
+        });
+        if (latestReviewComment) candidates.push(latestReviewComment);
+      }
+      if (candidates.length === 0) return null;
+      candidates.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      return candidates[0].user.login;
+    }
   }
 
   if (reason === "author") {
