@@ -27,7 +27,7 @@ Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-
 - Kommentar in einem **resolved** Review-Thread → überspringen (Resolven = „keine Antwort nötig", via GraphQL `reviewThreads.isResolved`)
 - bereits mit unserem 👀 gelockt → überspringen (schon bearbeitet)
 - vertrauenswürdiger Autor → für den Batch sammeln
-- Fremder → **Warnung, kein Lock** (das abschließende `markThreadRead` verhindert erneutes Warnen)
+- Fremder → **Warnung + Lock** (verhindert, dass derselbe Fremden-Kommentar bei jedem erneuten Auftauchen des Threads neu gewarnt wird)
 
 Die Notification wird erst als gelesen markiert, wenn alle vertrauenswürdigen Kommentare gelockt und der Batch verschickt ist — so geht kein Kommentar mehr verloren. Reguläre PR-Konversationskommentare (mit `latest_comment_url`) behalten den Einzel-Pfad.
 
@@ -84,6 +84,7 @@ Verbleibende Arbeit ist als eigene GitHub-Issues getrackt, nicht mehr inline hie
 
 ### ✅ Erledigt
 
+- [x] **Lock auf untrauten Inline-Review-Kommentaren** (Fund + Fix 2026-07-17, PR #13): Fremde Inline-Kommentare wurden nur gewarnt, nie gelockt. Da der Notification-Thread bei jeder neuen PR-Aktivität wieder als ungelesen auftaucht, wurde derselbe Fremden-Kommentar mehrfach neu gewarnt (7 Warnungen für 3 echte CodeRabbit-Kommentare auf party-insights-shenanigans#56). `handlePrReviewCommentBatch` lockt jetzt auch Fremden-Kommentare — die Kommentar-ID stammt aus der API und ist niemals angreifer-kontrollierter Text, das Lock ist also risikofrei. Regressionstest aktualisiert.
 - [x] **Selbst-Trigger-Schleife behoben** (Fund + Fix 2026-07-15): eigener Bot-Account (`arostovd`) wurde als „untrusted actor" gewarnt → Minuten-Schleife. `SELF_ACTOR`-Erkennung überspringt eigene Events still, markiert Thread aber gelesen. Regressionstest.
 - [x] **Batch-Verarbeitung Inline-Review-Kommentare** (Issue #8, Fix 2026-07-15): gebündelter Review verlor alle Kommentare außer dem neuesten. `handlePrReviewCommentBatch` holt alle, filtert pro Autor, lockt jeden, schickt einen Event, markiert Thread erst am Ende gelesen. 8 neue Tests.
 - [x] **Kanalregel in Happy-Path-Messages** (2026-07-15): ausführlich auf GitHub, in Discord nur Zusammenfassung mit Link — spart Tokens.
