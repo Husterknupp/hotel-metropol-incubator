@@ -588,14 +588,12 @@ describe("buildEventMessage", () => {
       expect(msg).toMatch(/Reply on GitHub/);
       expect(msg).toMatch(/full answer, in English/);
       expect(msg).toMatch(/Do not post anything to Discord/);
-      expect(msg).toMatch(/NO_REPLY/);
     }
   });
 
   test("the channel instruction is NOT part of the untrusted-actor warning", () => {
     const warning = buildWarningMessage("SomeStranger", "Husterknupp/repo");
     expect(warning).not.toMatch(/Reply on GitHub/);
-    expect(warning).not.toMatch(/NO_REPLY/);
   });
 });
 
@@ -638,7 +636,8 @@ describe("run – comment flow (happy path)", () => {
     expect(ghAdapter.addReaction).toHaveBeenCalled();
     // Event sent
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("React to Husterknupp's GitHub comment")
+      expect.stringContaining("React to Husterknupp's GitHub comment"),
+      { deliver: false }
     );
     // Thread marked read
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
@@ -682,7 +681,8 @@ describe("run – issue assignment flow (happy path)", () => {
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Work on Issue #1")
+      expect.stringContaining("Work on Issue #1"),
+      { deliver: false }
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
@@ -715,7 +715,8 @@ describe("run – issue assignment flow (happy path)", () => {
     run(ghAdapter, oclAdapter);
 
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Work on Issue #48")
+      expect.stringContaining("Work on Issue #48"),
+      { deliver: false }
     );
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
@@ -750,7 +751,8 @@ describe("run – PR review request flow (happy path)", () => {
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.addReaction).not.toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Review PR #7")
+      expect.stringContaining("Review PR #7"),
+      { deliver: false }
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
@@ -782,7 +784,8 @@ describe("run – PR review comment flow (happy path)", () => {
     );
     expect(ghAdapter.addReaction).toHaveBeenCalled();
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringMatching(/review comment on your PR #2/)
+      expect.stringMatching(/review comment on your PR #2/),
+      { deliver: false }
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
@@ -816,7 +819,8 @@ describe("run – PR review comment flow (happy path)", () => {
       expect.objectContaining({ commentId: "9001", content: "eyes" })
     );
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringMatching(/review comment\(s\) on your PR #3/)
+      expect.stringMatching(/review comment\(s\) on your PR #3/),
+      { deliver: false }
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
   });
@@ -938,7 +942,8 @@ describe("run – PR review comment flow (happy path)", () => {
     );
     // The trusted comment is still handled in a batch event
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringMatching(/React to 1 review comment/)
+      expect.stringMatching(/React to 1 review comment/),
+      { deliver: false }
     );
     // Thread marked read at the end → stranger won't be re-warned
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);

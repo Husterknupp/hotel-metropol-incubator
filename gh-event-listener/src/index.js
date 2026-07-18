@@ -230,14 +230,19 @@ function parseRepo(notification) {
 
 /**
  * Instruction appended to every happy-path event message: the substantial
- * answer goes on GitHub only. Discord stays silent for happy-path events —
- * the agent ends its turn with the exact silent token NO_REPLY instead of
- * posting a summary there (Benjamin only wants to be pinged for warnings).
+ * answer goes on GitHub only. Discord stays silent for happy-path events
+ * (Benjamin only wants to be pinged for warnings) — enforced structurally by
+ * calling sendEvent with { deliver: false } below, not by asking the model to
+ * end its turn with NO_REPLY. That token only suppresses a BARE silent reply;
+ * once the model writes visible text (e.g. confirming the GitHub post) before
+ * it, delivery goes through as normal and NO_REPLY just becomes literal
+ * trailing text (see the 2026-07-18 investigation). "Do not post anything to
+ * Discord" still matters here: it stops the model from proactively calling
+ * the message tool mid-turn, which --deliver/-less has no control over.
  * Deliberately NOT added to the warning message — warnings stay as-is.
  */
 const CHANNEL_INSTRUCTION =
-  " Reply on GitHub with the full answer, in English. Do not post anything to Discord;" +
-  " end your turn with the exact silent token NO_REPLY.";
+  " Reply on GitHub with the full answer, in English. Do not post anything to Discord.";
 
 /**
  * Build the agent event message for a given notification.
@@ -509,7 +514,7 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
   const message = buildPrReviewBatchMessage(prNumber, repoFull, trusted);
 
   try {
-    oclAdapter.sendEvent(message);
+    oclAdapter.sendEvent(message, { deliver: false });
     ghAdapter.markThreadRead(notification.id);
     log("pr_review_comment", message);
   } catch (err) {
@@ -643,7 +648,7 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     }
 
     try {
-      oclAdapter.sendEvent(message);
+      oclAdapter.sendEvent(message, { deliver: false });
       ghAdapter.markThreadRead(notification.id);
       log(kind, message);
     } catch (err) {

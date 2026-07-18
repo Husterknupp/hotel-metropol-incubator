@@ -92,7 +92,8 @@ describe("contract: recorded GitHub responses for a genuine assignment", () => {
     run(ghAdapter, oclAdapter);
 
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
-      expect.stringContaining("Work on Issue #48")
+      expect.stringContaining("Work on Issue #48"),
+      { deliver: false }
     );
     expect(ghAdapter.addIssueReaction).toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).toHaveBeenCalled();
@@ -201,7 +202,8 @@ describe("contract: recorded GitHub responses for a genuine inline review commen
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining(
         "React to Husterknupp's GitHub comment (repo Husterknupp/party-insights-shenanigans)"
-      )
+      ),
+      { deliver: false }
     );
     expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notification.id);
   });
