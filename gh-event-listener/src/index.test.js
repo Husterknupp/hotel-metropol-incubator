@@ -574,7 +574,7 @@ describe("buildEventMessage", () => {
     expect(msg).toMatch(/Do not @-mention/);
   });
 
-  test("every happy-path message tells the agent to answer on GitHub and only summarize in Discord", () => {
+  test("every happy-path message tells the agent to answer on GitHub only and stay silent on Discord", () => {
     const issueNotif = makeNotification({
       subject: { type: "Issue", url: "https://api.github.com/repos/x/y/issues/1" },
     });
@@ -587,15 +587,15 @@ describe("buildEventMessage", () => {
       const msg = buildEventMessage(kind, n);
       expect(msg).toMatch(/Reply on GitHub/);
       expect(msg).toMatch(/full answer, in English/);
-      expect(msg).toMatch(/Discord only post a two-liner summary/);
-      expect(msg).toMatch(/two-liner summary,\s*in German/);
+      expect(msg).toMatch(/Do not post anything to Discord/);
+      expect(msg).toMatch(/NO_REPLY/);
     }
   });
 
   test("the channel instruction is NOT part of the untrusted-actor warning", () => {
     const warning = buildWarningMessage("SomeStranger", "Husterknupp/repo");
     expect(warning).not.toMatch(/Reply on GitHub/);
-    expect(warning).not.toMatch(/two-liner summary/);
+    expect(warning).not.toMatch(/NO_REPLY/);
   });
 });
 
