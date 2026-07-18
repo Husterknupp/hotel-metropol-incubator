@@ -12,7 +12,7 @@ Designed to run as a cron job — no inbound HTTP traffic required.
 4. **Skips self-triggered events**: activity from our own bot account (`SELF_ACTOR`, default: `arostovd`) is ignored — no warning, no re-trigger — but the thread is still marked read, so replying on a PR can't feed the listener back into itself
 5. Checks the trusted actor filter (`TRUSTED_ACTOR`, default: `Husterknupp`)
 6. Sets an emoji reaction as a distributed lock to prevent duplicate processing — on the triggering comment when one exists, or on the issue/PR itself for a genuine assignment/review request (nothing to comment on yet)
-7. Sends an event to the OpenClaw main agent via `openclaw agent --session-key <key> --message "<text>" --deliver` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window). Happy-path events instruct the agent to answer in full on GitHub and only post a short summary (with a link) to Discord.
+7. Sends an event to the OpenClaw main agent via `openclaw agent --session-key <key> --message "<text>"` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window). Happy-path events instruct the agent to answer in full on GitHub and stay silent on Discord — enforced structurally by omitting `--deliver` for these calls, not by asking the model to end its turn with a silent token. Only warnings (untrusted actors) are sent with `--deliver` and reach Discord.
 8. Marks the notification thread as read
 9. On failure: removes the lock reaction so the next cron run retries naturally
 
@@ -104,6 +104,6 @@ src/
   index.js            # Main logic + entry point
   gh-adapter.js       # Thin wrapper around `gh` CLI
   gh-adapter.test.js  # Jest tests for shell-safe gh api URLs
-  openclaw-adapter.js # Thin wrapper around `openclaw agent --deliver`
+  openclaw-adapter.js # Thin wrapper around `openclaw agent`; `--deliver` defaults on, omitted for silent happy-path calls
   index.test.js       # Jest tests
 ```
