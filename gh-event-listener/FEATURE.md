@@ -31,14 +31,14 @@ Events von unbekannten Akteuren → Warning-Nachricht an konfigurierten Discord-
 
 Die Notification wird erst als gelesen markiert, wenn alle vertrauenswürdigen Kommentare gelockt und der Batch verschickt ist — so geht kein Kommentar mehr verloren. Reguläre PR-Konversationskommentare (mit `latest_comment_url`) behalten den Einzel-Pfad.
 
-**Happy-Path-Kanalregel:** Jede Event-Message (nicht die Warnung) enthält die Anweisung, ausführlich auf GitHub zu antworten und in Discord nur eine kurze Zusammenfassung mit Link zu posten (Token-Ersparnis).
+**Happy-Path-Kanalregel:** Jede Event-Message (nicht die Warnung) enthält die Anweisung, ausführlich auf GitHub zu antworten und in Discord gar nichts zu posten. Die Stille wird strukturell erzwungen — `sendEvent` wird für Happy-Path-Events mit `{ deliver: false }` aufgerufen, wodurch `--deliver` beim `openclaw agent`-Aufruf entfällt und der Turn auf der Hauptsession läuft, ohne dass die Antwort automatisch nach Discord zugestellt wird. Nur Warnungen (Fremden-Akteure) werden weiterhin mit `--deliver` verschickt und landen in Discord.
 
 ---
 
 ## Architektur
 
 - **Polling**: Cron-basiert (~60s, via `run.sh`). Kein Daemon, kein HTTP-Inbound.
-- **Trigger-Primitive**: `openclaw agent --session-key <key> --message "<text>" --deliver` — synchroner Agent-Turn über das Gateway, unabhängig vom Heartbeat/Active-Hours-Fenster. (`openclaw system event` wurde verworfen — puffert nur bis zum nächsten Heartbeat-Tick, siehe Issue #1.)
+- **Trigger-Primitive**: `openclaw agent --session-key <key> --message "<text>"` — synchroner Agent-Turn über das Gateway, unabhängig vom Heartbeat/Active-Hours-Fenster. `--deliver` wird über `sendEvent(text, { deliver })` gesteuert: Default `true` (Warnungen), `false` für Happy-Path-Events (stille Zustellung, siehe Kanalregel oben). (`openclaw system event` wurde verworfen — puffert nur bis zum nächsten Heartbeat-Tick, siehe Issue #1.)
 - **Sticky `reason`-Erkennung**: `assign`/`review_requested` bleibt als `reason` bestehen, solange die Zuweisung/Review-Anfrage aktiv ist — auch für reine Folgekommentare auf demselben Thread. `isActuallyAComment()` unterscheidet über `subject.latest_comment_url` vs. `subject.url`: identisch → echte Zuweisung; unterschiedlich → tatsächlich ein Kommentar.
 - **Selbst-Erkennung (`SELF_ACTOR`)**: Kommentare/Reaktionen des eigenen Bot-Accounts werden ignoriert — keine Warnung, kein Re-Trigger, aber Thread wird gelesen. Verhindert die Rückkopplungsschleife, in der jede eigene Antwort eine neue „untrusted actor"-Warnung erzeugt (Fund 2026-07-15).
 - **Locking**: Emoji-Reaktion (`eyes`).
@@ -87,7 +87,8 @@ Verbleibende Arbeit ist als eigene GitHub-Issues getrackt, nicht mehr inline hie
 - [x] **Lock auf untrauten Inline-Review-Kommentaren** (Fund + Fix 2026-07-17, PR #13): Fremde Inline-Kommentare wurden nur gewarnt, nie gelockt. Da der Notification-Thread bei jeder neuen PR-Aktivität wieder als ungelesen auftaucht, wurde derselbe Fremden-Kommentar mehrfach neu gewarnt (7 Warnungen für 3 echte CodeRabbit-Kommentare auf party-insights-shenanigans#56). `handlePrReviewCommentBatch` lockt jetzt auch Fremden-Kommentare — die Kommentar-ID stammt aus der API und ist niemals angreifer-kontrollierter Text, das Lock ist also risikofrei. Regressionstest aktualisiert.
 - [x] **Selbst-Trigger-Schleife behoben** (Fund + Fix 2026-07-15): eigener Bot-Account (`arostovd`) wurde als „untrusted actor" gewarnt → Minuten-Schleife. `SELF_ACTOR`-Erkennung überspringt eigene Events still, markiert Thread aber gelesen. Regressionstest.
 - [x] **Batch-Verarbeitung Inline-Review-Kommentare** (Issue #8, Fix 2026-07-15): gebündelter Review verlor alle Kommentare außer dem neuesten. `handlePrReviewCommentBatch` holt alle, filtert pro Autor, lockt jeden, schickt einen Event, markiert Thread erst am Ende gelesen. 8 neue Tests.
-- [x] **Kanalregel in Happy-Path-Messages** (2026-07-15): ausführlich auf GitHub, in Discord nur Zusammenfassung mit Link — spart Tokens.
+- [x] **Happy-Path-Stille strukturell statt modellseitig erzwungen** (Fund + Fix 2026-07-18, PR #14): die ursprüngliche Kanalregel (Zusammenfassung mit Link in Discord) sollte durch vollständige Stille für Happy-Path-Events ersetzt werden. Der erste Versuch bat das Modell, den Turn mit `NO_REPLY` zu beenden — funktionierte nicht zuverlässig, da die Direktsession (`agent:main:main`) das Suppression nur bei einer *reinen* Silent-Token-Antwort greifen lässt, nicht wenn das Modell zuvor sichtbaren Text schreibt. Fix: `sendEvent(text, { deliver: false })` lässt `--deliver` beim `openclaw agent`-Aufruf ganz weg, wodurch die Zustellung strukturell entfällt statt von Modell-Compliance abzuhängen. `deliver` defaultet auf `true` (Warnungen bleiben unverändert).
+- [x] **Kanalregel in Happy-Path-Messages** (2026-07-15, seit 2026-07-18 durch vollständige Stille ersetzt, siehe Eintrag oben): ausführlich auf GitHub, in Discord nur Zusammenfassung mit Link — spart Tokens.
 - [x] `subject.actor.login` → Actor muss aus URL nachgeladen werden (`resolveActor`)
 - [x] Cron PATH-Fix (`run.sh` Wrapper mit korrektem PATH)
 - [x] Trigger-Primitive: `openclaw system event` verworfen (puffert nur bis zum nächsten Heartbeat) → `openclaw agent --session-key ... --deliver` (synchroner Turn, live validiert 2026-07-14)
