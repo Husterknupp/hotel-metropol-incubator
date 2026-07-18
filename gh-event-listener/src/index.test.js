@@ -902,7 +902,7 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(msg).not.toContain("111");
   });
 
-  test("issue #8: a stranger's inline comment in the batch → warning but NO lock; trusted ones still processed", () => {
+  test("issue #8: a stranger's inline comment in the batch → warning AND lock; trusted ones still processed", () => {
     const inlineReviewNotif = makeNotification({
       reason: "author",
       subject: {
@@ -927,12 +927,15 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringContaining("untrusted actor")
     );
-    // Only the trusted comment gets locked — the stranger's comment is NOT locked
+    // Both the trusted comment AND the stranger's comment get locked, so the
+    // stranger is never warned about twice when the thread resurfaces.
     const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
       (c) => c[0].commentId
     );
-    expect(lockedIds).toEqual(["111"]);
-    expect(lockedIds).not.toContain("999");
+    expect(lockedIds).toEqual(expect.arrayContaining(["111", "999"]));
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "999", content: "eyes" })
+    );
     // The trusted comment is still handled in a batch event
     expect(oclAdapter.sendEvent).toHaveBeenCalledWith(
       expect.stringMatching(/React to 1 review comment/)
