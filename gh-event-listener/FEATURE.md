@@ -39,6 +39,7 @@ Die Notification wird erst als gelesen markiert, wenn alle vertrauenswürdigen K
 
 - **Polling**: Cron-basiert (~60s, via `run.sh`). Kein Daemon, kein HTTP-Inbound.
 - **Trigger-Primitive**: `openclaw agent --session-key <key> --message "<text>"` — synchroner Agent-Turn über das Gateway, unabhängig vom Heartbeat/Active-Hours-Fenster. `--deliver` wird über `sendEvent(text, { deliver })` gesteuert: Default `true` (Warnungen), `false` für Happy-Path-Events (stille Zustellung, siehe Kanalregel oben). (`openclaw system event` wurde verworfen — puffert nur bis zum nächsten Heartbeat-Tick, siehe Issue #1.)
+- **Isolierte Session für Warnungen (`sendWarning`)**: Warnungen laufen seit dem Fund vom 2026-07-19 nie mehr auf `agent:main:main`, sondern auf einem fixen, separaten Session-Key (`OPENCLAW_WARN_SESSION_KEY`, Default `agent:main:gh-warnings`) — gleicher Agent (`main`), gleiches Modell, gleiche Tools, aber eigenes leeres Transcript ohne laufenden Task-Kontext. Details siehe „Erledigt"-Eintrag unten und `README.md`.
 - **Sticky `reason`-Erkennung**: `assign`/`review_requested` bleibt als `reason` bestehen, solange die Zuweisung/Review-Anfrage aktiv ist — auch für reine Folgekommentare auf demselben Thread. `isActuallyAComment()` unterscheidet über `subject.latest_comment_url` vs. `subject.url`: identisch → echte Zuweisung; unterschiedlich → tatsächlich ein Kommentar.
 - **Selbst-Erkennung (`SELF_ACTOR`)**: Kommentare/Reaktionen des eigenen Bot-Accounts werden ignoriert — keine Warnung, kein Re-Trigger, aber Thread wird gelesen. Verhindert die Rückkopplungsschleife, in der jede eigene Antwort eine neue „untrusted actor"-Warnung erzeugt (Fund 2026-07-15).
 - **Locking**: Emoji-Reaktion (`eyes`).
@@ -65,6 +66,8 @@ Die Notification wird erst als gelesen markiert, wenn alle vertrauenswürdigen K
 | `SELF_ACTOR` | `arostovd` | Eigener Bot-Account. Events aus eigenen Kommentaren werden ignoriert (keine Warnung, kein Re-Trigger), damit sich der Listener nicht selbst füttert |
 | `LOCK_REACTION` | `eyes` | Emoji-Reaktion als verteiltes Lock |
 | `WARN_CHANNEL` | `null` | Discord-Channel für Third-Party-Warnungen |
+| `OPENCLAW_WARN_SESSION_KEY` | `agent:main:gh-warnings` | Session-Key für Fremden-Warnungen — getrennt von `OPENCLAW_SESSION_KEY`, damit Warnungen nie den Task-Kontext einer laufenden Session erben (Fund 2026-07-19) |
+| `OPENCLAW_SESSION_KEY` | `agent:main:main` | Session-Key für vertrauenswürdige/Happy-Path-Events |
 | `DEBUG` | `false` | `true`/`1` → debug logs + `markThreadRead` wird übersprungen |
 
 **DEBUG-Modus**: `DEBUG=true node src/index.js`  
@@ -84,6 +87,7 @@ Verbleibende Arbeit ist als eigene GitHub-Issues getrackt, nicht mehr inline hie
 
 ### ✅ Erledigt
 
+- [x] **Isolierte Session für Fremden-Warnungen** (Fund + Fix 2026-07-19): Auf `party-insights-shenanigans#46` warnte der Listener korrekt vor `coderabbitai[bot]` (untrusted) und schickte nie einen „bitte adressieren"-Auftrag — trotzdem committete der Agent 105 Sekunden nach CodeRabbits Review genau die von ihr benannte Korrektur, weil die (inhaltsleere) Warnung auf derselben Session lief, die gerade mitten in der Arbeit an genau diesem PR steckte. Der laufende Task-Kontext hat zum eigenständigen Nachschauen und Handeln verleitet, nicht die Warnnachricht selbst. Fix: `sendWarning()` in `openclaw-adapter.js` pinnt Warnungen fest auf einen separaten Session-Key (`OPENCLAW_WARN_SESSION_KEY`, Default `agent:main:gh-warnings`) statt `agent:main:main` — gleicher Agent/gleiche Tools, aber kein geteilter Task-Kontext mehr. Löst NICHT die fehlende Tool-Beschränkung (dieselbe Session könnte weiterhin committen, wenn sie es wollte) — das bräuchte einen echten separaten Agenten mit eingeschränktem Toolset, zurückgestellt bis/falls es erneut vorkommt. Regressionstests in `openclaw-adapter.test.js` und `index.test.js`.
 - [x] **Lock auf untrauten Inline-Review-Kommentaren** (Fund + Fix 2026-07-17, PR #13): Fremde Inline-Kommentare wurden nur gewarnt, nie gelockt. Da der Notification-Thread bei jeder neuen PR-Aktivität wieder als ungelesen auftaucht, wurde derselbe Fremden-Kommentar mehrfach neu gewarnt (7 Warnungen für 3 echte CodeRabbit-Kommentare auf party-insights-shenanigans#56). `handlePrReviewCommentBatch` lockt jetzt auch Fremden-Kommentare — die Kommentar-ID stammt aus der API und ist niemals angreifer-kontrollierter Text, das Lock ist also risikofrei. Regressionstest aktualisiert.
 - [x] **Selbst-Trigger-Schleife behoben** (Fund + Fix 2026-07-15): eigener Bot-Account (`arostovd`) wurde als „untrusted actor" gewarnt → Minuten-Schleife. `SELF_ACTOR`-Erkennung überspringt eigene Events still, markiert Thread aber gelesen. Regressionstest.
 - [x] **Batch-Verarbeitung Inline-Review-Kommentare** (Issue #8, Fix 2026-07-15): gebündelter Review verlor alle Kommentare außer dem neuesten. `handlePrReviewCommentBatch` holt alle, filtert pro Autor, lockt jeden, schickt einen Event, markiert Thread erst am Ende gelesen. 8 neue Tests.

@@ -12,6 +12,9 @@
 //   LOCK_REACTION   Emoji reaction used as a distributed lock (default: eyes)
 //   WARN_CHANNEL    (optional) Discord channel ID for third-party event warnings.
 //                   If not set, the warning goes to the agent's default channel.
+//   OPENCLAW_WARN_SESSION_KEY  Session key for untrusted-actor warnings, kept
+//                   separate from the main session (default: agent:main:gh-warnings).
+//                   See openclaw-adapter.js for why this must not be the main session.
 //
 // Classification (based on notification.reason + subject.type):
 //   1. mention           → comment: someone @-mentioned us
@@ -472,7 +475,7 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
   for (const { comment, author } of untrusted) {
     log("error", `Untrusted actor: ${author}`);
     try {
-      oclAdapter.sendEvent(buildWarningMessage(author, repoFull));
+      oclAdapter.sendWarning(buildWarningMessage(author, repoFull));
     } catch (err) {
       log("error", `Failed to send warning: ${err.message}`);
     }
@@ -612,7 +615,7 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     if (!actor || actor !== TRUSTED_ACTOR) {
       log("error", `Untrusted actor: ${actor || "unknown"}`);
       try {
-        oclAdapter.sendEvent(
+        oclAdapter.sendWarning(
           buildWarningMessage(
             actor || "unknown",
             notification.repository?.full_name
