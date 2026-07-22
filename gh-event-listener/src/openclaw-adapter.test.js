@@ -84,4 +84,46 @@ describe("sendWarning", () => {
       expect.anything()
     );
   });
+
+  // 2026-07-22 incident: both real untrusted-actor warnings sent after the
+  // isolated session key shipped failed with "Discord recipient is
+  // required" because the new session had no channel binding of its own.
+  // --deliver alone is not enough for a session that's never been used.
+  describe("with OPENCLAW_WARN_REPLY_TO configured", () => {
+    beforeEach(() => {
+      process.env.OPENCLAW_WARN_REPLY_CHANNEL = "discord";
+      process.env.OPENCLAW_WARN_REPLY_TO = "user:123456789";
+    });
+
+    afterEach(() => {
+      delete process.env.OPENCLAW_WARN_REPLY_CHANNEL;
+      delete process.env.OPENCLAW_WARN_REPLY_TO;
+    });
+
+    test("includes an explicit reply target", () => {
+      sendWarning("Warning: untrusted actor");
+      expect(execSync).toHaveBeenCalledWith(
+        expect.stringMatching(/--reply-channel discord --reply-to "user:123456789"/),
+        expect.anything()
+      );
+    });
+  });
+
+  // 2026-07-22 follow-up: the repo is public, so OPENCLAW_WARN_REPLY_TO must
+  // never default to a real person's ID baked into source. Confirm the
+  // absence is loud (a logged error) rather than a silent, unexplained
+  // delivery failure.
+  test("without OPENCLAW_WARN_REPLY_TO set, omits the reply target and logs an error", () => {
+    delete process.env.OPENCLAW_WARN_REPLY_TO;
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    sendWarning("Warning: untrusted actor");
+    expect(execSync).toHaveBeenCalledWith(
+      expect.not.stringContaining("--reply-channel"),
+      expect.anything()
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OPENCLAW_WARN_REPLY_TO")
+    );
+    errorSpy.mockRestore();
+  });
 });

@@ -26,6 +26,12 @@ Designed to run as a cron job — no inbound HTTP traffic required.
 
 The fix: warnings now always go through `sendWarning()`, which is pinned to a fixed, separate session key (`OPENCLAW_WARN_SESSION_KEY`, default `agent:main:gh-warnings`) instead of the main session. This is not a new configured agent — same model, same tools, same `main` agent config — just a different, isolated transcript with no "I'm already working on this" context to act on. It removes the momentum that turned a passive warning into an unauthorized fix; it does **not** restrict what tools that session could use if it decided to act anyway (that would require a genuinely separate agent with a restricted toolset, deferred until/unless this recurs).
 
+### Why warnings need an explicit reply target
+
+**Incident, 2026-07-22 (found while investigating a follow-up report):** both real untrusted-actor events that occurred after the isolated session key above shipped (2026-07-20, `coderabbitai[bot]` on `party-insights-shenanigans#60`, twice) produced a logged `Untrusted actor: ...` entry but **no** Discord message reached Benjamin — `sendWarning()` itself threw `GatewayClientRequestError: Discord recipient is required. Use "channel:<id>" ... or "user:<id>"`. `--deliver` on the main session (`agent:main:main`) needs no extra flags because that session already has a bound Discord recipient from ordinary use; the isolated `gh-warnings` session introduced above is brand new and was never bound to any channel, so `--deliver` had nowhere to route to — a 100% delivery failure for every warning since the isolation fix landed.
+
+The fix: `sendWarning()` now always passes an explicit `--reply-channel`/`--reply-to` (`OPENCLAW_WARN_REPLY_CHANNEL`/`OPENCLAW_WARN_REPLY_TO`, defaulting to Benjamin's Discord DM) alongside `--deliver`, so the isolated session has somewhere to send to regardless of whether it's ever been used before.
+
 ## Setup
 
 ```bash
@@ -83,6 +89,8 @@ tail -f logs/gh-event-listener.log            # watch for output within 60s
 | `LOCK_REACTION` | `eyes` | Emoji reaction used as distributed lock |
 | `WARN_CHANNEL` | _(not set)_ | Discord channel ID for untrusted-actor warnings. If not set, the agent uses its default channel. |
 | `OPENCLAW_WARN_SESSION_KEY` | `agent:main:gh-warnings` | Session key for untrusted-actor warnings — kept separate from `OPENCLAW_SESSION_KEY` so warnings never inherit an ongoing task's context (see "Why warnings run on an isolated session" above) |
+| `OPENCLAW_WARN_REPLY_CHANNEL` | `discord` | Delivery channel for the isolated warning session. Required because that session has no channel binding of its own — see "Why warnings need an explicit reply target" below |
+| `OPENCLAW_WARN_REPLY_TO` | _(not set — required)_ | Delivery recipient for the isolated warning session, e.g. `user:<discord-user-id>` (same format as `openclaw agent --reply-to`). No default on purpose: this identifies a specific person, so each deployment must set its own rather than inheriting one baked into the repo. |
 | `OPENCLAW_SESSION_KEY` | `agent:main:main` | Session key for trusted/happy-path events |
 
 ## Logging
