@@ -36,7 +36,10 @@ The fix: `sendWarning()` now always passes an explicit `--reply-channel`/`--repl
 
 ```bash
 npm install
+cp .env.example .env   # then fill in OPENCLAW_WARN_REPLY_TO (and _CHANNEL if not Discord)
 ```
+
+`.env` is loaded automatically (via `dotenv`) and is gitignored — it never gets committed. `OPENCLAW_WARN_REPLY_TO` has no default because it identifies a specific person; without it, untrusted-actor warnings will fail to deliver (see "Why warnings need an explicit reply target" below).
 
 ## Scheduling on Ubuntu (cron)
 

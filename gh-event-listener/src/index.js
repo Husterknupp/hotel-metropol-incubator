@@ -15,6 +15,10 @@
 //   OPENCLAW_WARN_SESSION_KEY  Session key for untrusted-actor warnings, kept
 //                   separate from the main session (default: agent:main:gh-warnings).
 //                   See openclaw-adapter.js for why this must not be the main session.
+//   OPENCLAW_WARN_REPLY_CHANNEL / OPENCLAW_WARN_REPLY_TO  Delivery target for the
+//                   isolated warning session — see openclaw-adapter.js. No defaults:
+//                   both identify a specific person/channel, so every deployment must
+//                   set its own via .env (see .env.example) rather than a repo default.
 //
 // Classification (based on notification.reason + subject.type):
 //   1. mention           → comment: someone @-mentioned us
@@ -23,6 +27,13 @@
 //   4. review_requested  → pr: we were asked to review a PR
 //   5. author + Issue    → comment: someone commented on an issue we created
 //   6. author + PR       → pr_review_comment: someone commented on a PR we created
+
+// Must run before any require() that reads process.env at module load time
+// (gh-adapter.js, openclaw-adapter.js) — otherwise .env values arrive too late.
+require("dotenv").config({
+  path: require("path").join(__dirname, "..", ".env"),
+  quiet: true, // this runs every ~60s via cron; the injected-vars banner would spam the log
+});
 
 const gh = require("./gh-adapter");
 const openclaw = require("./openclaw-adapter");
