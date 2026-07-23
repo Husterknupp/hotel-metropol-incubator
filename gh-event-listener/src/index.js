@@ -42,6 +42,25 @@ const TRUSTED_ACTOR = process.env.TRUSTED_ACTOR || "Husterknupp";
 const SELF_ACTOR = process.env.SELF_ACTOR || "arostovd";
 const LOCK_REACTION = process.env.LOCK_REACTION || "eyes";
 const WARN_CHANNEL = process.env.WARN_CHANNEL || null;
+// Issue #7: 👀 used to double as both "in progress" and "done" — no way to
+// tell a still-pending turn from a finished one, or a finished one from a
+// failed one. These reactions are added ON TOP of 👀 once the outcome is
+// known (reactions of different content are independent, so nothing needs to
+// be removed to add one — see addOutcomeReaction). GitHub's reactions API
+// only accepts +1, -1, laugh, confused, heart, hooray, rocket, eyes; there is
+// no hourglass/pending option, so the pending state stays represented by 👀
+// alone rather than a dedicated reaction.
+const SUCCESS_REACTION = process.env.SUCCESS_REACTION || "rocket";
+const ERROR_REACTION = process.env.ERROR_REACTION || "confused";
+// Issue #6/#16 review: a bare 👀 with nothing added on top used to mean two
+// very different things — "our own ETIMEDOUT fired, turn is presumed still
+// healthy" and "the process died silently before ever reaching an outcome"
+// (e.g. crashed between acquireLock and sendEvent returning). Both looked
+// identical from the outside. Adding TIMEOUT_REACTION when ETIMEDOUT fires
+// distinguishes the two: 👀+👍 means "we know we hit our own timeout, this is
+// the expected slow-turn case"; a bare 👀 with no outcome reaction at all
+// past its poll cycle means something never even got that far.
+const TIMEOUT_REACTION = process.env.TIMEOUT_REACTION || "+1";
 
 const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
 
@@ -414,6 +433,30 @@ function releaseLock(notification, lock, ghAdapter) {
 }
 
 /**
+ * Add an outcome reaction (SUCCESS_REACTION or ERROR_REACTION) to the same
+ * target the lock reaction sits on. Unlike releaseLock, this never removes
+ * anything — reactions of different `content` are independent on GitHub, so
+ * 👀 and the outcome reaction can coexist. Husterknupp specifically flagged
+ * the risk of a wrongly-deleted reaction (issue #7 discussion); leaving 👀 in
+ * place and only ever adding avoids that class of bug entirely.
+ * lock: {commentId, lockType} as returned by acquireLock (or a synthetic
+ * equivalent for batch-locked PR review comments).
+ */
+function addOutcomeReaction(notification, lock, ghAdapter, content) {
+  if (!lock) return;
+  const { owner, repo } = parseRepo(notification);
+  const { commentId, lockType } = lock;
+
+  if (lockType === "pr_review") {
+    ghAdapter.addPrReviewCommentReaction({ owner, repo, commentId, content });
+  } else if (lockType === "issue_subject") {
+    ghAdapter.addIssueReaction({ owner, repo, issueNumber: commentId, content });
+  } else {
+    ghAdapter.addReaction({ owner, repo, commentId, content });
+  }
+}
+
+/**
  * Handle a PR inline-review-comment notification as a BATCH.
  *
  * A submitted review bundles many inline comments under a single notification
@@ -530,28 +573,74 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
   try {
     oclAdapter.sendEvent(message, { deliver: false });
     ghAdapter.markThreadRead(notification.id);
-    log("pr_review_comment", message);
-  } catch (err) {
-    log("error", `Failed to send event or mark read: ${err.message}`);
-    // Release every lock we set so the batch is retried on the next poll.
     for (const c of locked) {
       try {
-        const reactions = ghAdapter.getPrReviewCommentReactions({
-          owner,
-          repo,
-          commentId: String(c.id),
-        });
-        const ours = reactions.find((r) => r.content === LOCK_REACTION);
-        if (ours) {
-          ghAdapter.removePrReviewCommentReaction({
-            owner,
-            repo,
-            commentId: String(c.id),
-            reactionId: ours.id,
-          });
+        addOutcomeReaction(
+          notification,
+          { commentId: String(c.id), lockType: "pr_review" },
+          ghAdapter,
+          SUCCESS_REACTION
+        );
+      } catch (reactErr) {
+        log("error", `Failed to add success reaction to ${c.id}: ${reactErr.message}`);
+      }
+    }
+    log("pr_review_comment", message);
+  } catch (err) {
+    // Issue #7: our own execSync timeout (ETIMEDOUT) firing is not the same
+    // as a genuine CLI failure — every ETIMEDOUT we've observed in practice
+    // turned out to be a healthy turn still running past our old, too-tight
+    // timeout (see openclaw-adapter.js). Leave the 👀 locks in place (still
+    // the most honest signal: "forwarded, answer pending") instead of
+    // releasing them and retrying — a retry here would re-dispatch a turn
+    // that may already be in flight. Issue #6/#16 review: add TIMEOUT_REACTION
+    // (👍) on top so this state is distinguishable from a lock stuck since
+    // the very start (e.g. a process that died before ever reaching this
+    // catch block at all) — both used to look like a bare 👀.
+    // Issue #16 review (Husterknupp): mark the thread read here too, in both
+    // branches below. The locks already prevent any further reprocessing —
+    // a later poll on an unread thread would just log "already locked" per
+    // comment and do nothing else, so leaving it unread only means repeated
+    // wasted GitHub API calls, not a preserved signal. The outcome reaction
+    // (👍/😕) already carries the visible signal, and it lives on the
+    // comments themselves, not on notification read-state.
+    if (err.code === "ETIMEDOUT") {
+      log("pending", `sendEvent exceeded timeout for batch, assuming turn is still running: ${err.message}`);
+      ghAdapter.markThreadRead(notification.id);
+      for (const c of locked) {
+        try {
+          addOutcomeReaction(
+            notification,
+            { commentId: String(c.id), lockType: "pr_review" },
+            ghAdapter,
+            TIMEOUT_REACTION
+          );
+        } catch (reactErr) {
+          log("error", `Failed to add timeout reaction to ${c.id}: ${reactErr.message}`);
         }
-      } catch (releaseErr) {
-        log("error", `Failed to release lock ${c.id}: ${releaseErr.message}`);
+      }
+      return;
+    }
+    log("error", `Failed to send event or mark read: ${err.message}`);
+    ghAdapter.markThreadRead(notification.id);
+    // Issue #16 review: a genuine (non-ETIMEDOUT) failure — bad CLI args, an
+    // exhausted provider quota, a broken config — does not fix itself on
+    // retry. Releasing the lock here would let the next poll immediately
+    // re-acquire it and hit the same failure again, recreating the
+    // once-a-minute retry loop from 2026-07-20/21 (see #7/#8). So the lock
+    // stays in place alongside 😕: the batch is left visibly stuck rather
+    // than silently retried, and needs a human to clear 👀 once the
+    // underlying cause is fixed.
+    for (const c of locked) {
+      try {
+        addOutcomeReaction(
+          notification,
+          { commentId: String(c.id), lockType: "pr_review" },
+          ghAdapter,
+          ERROR_REACTION
+        );
+      } catch (reactErr) {
+        log("error", `Failed to add error reaction to ${c.id}: ${reactErr.message}`);
       }
     }
   }
@@ -664,13 +753,56 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     try {
       oclAdapter.sendEvent(message, { deliver: false });
       ghAdapter.markThreadRead(notification.id);
+      try {
+        addOutcomeReaction(notification, lock, ghAdapter, SUCCESS_REACTION);
+      } catch (reactErr) {
+        log("error", `Failed to add success reaction: ${reactErr.message}`);
+      }
       log(kind, message);
     } catch (err) {
+      // Issue #7: distinguish our own execSync timeout (ETIMEDOUT — the turn
+      // is likely still running past the old, too-tight timeout) from a
+      // genuine CLI failure. Issue #6/#16 review: add TIMEOUT_REACTION (👍) on
+      // top of 👀 so this is distinguishable from a lock stuck since the very
+      // start (process died before ever reaching this catch block) — both
+      // used to look like a bare 👀 with nothing else.
+      //
+      // Issue #16 review (Husterknupp): mark the thread read here too. The
+      // lock already prevents any further reprocessing — a later poll on an
+      // unread thread would just log "already locked" and do nothing else,
+      // so leaving it unread only means repeated wasted GitHub API calls,
+      // not a preserved signal. The outcome reaction (👍/😕) already carries
+      // the visible signal, and it lives on the comment/issue itself, not on
+      // notification read-state — marking read doesn't hide it from anyone
+      // looking at the actual thread.
+      if (err.code === "ETIMEDOUT") {
+        log("pending", `sendEvent exceeded timeout, assuming turn is still running: ${err.message}`);
+        ghAdapter.markThreadRead(notification.id);
+        try {
+          addOutcomeReaction(notification, lock, ghAdapter, TIMEOUT_REACTION);
+        } catch (reactErr) {
+          log("error", `Failed to add timeout reaction: ${reactErr.message}`);
+        }
+        continue;
+      }
+      // Issue #16 review: a genuine failure (bad CLI args, exhausted provider
+      // quota, broken config) does not fix itself. Releasing the lock here
+      // would let the next poll immediately re-acquire it and hit the same
+      // failure again — the once-a-minute retry loop from 2026-07-20/21
+      // (#7/#8) that this whole effort exists to prevent. So on a genuine
+      // failure the lock is deliberately left in place alongside 😕: the
+      // notification is left visibly stuck, not silently retried, and needs
+      // a human to clear 👀 once the underlying cause is fixed. Thread is
+      // marked read for the same reason as the ETIMEDOUT case above — the
+      // lock already stops reprocessing, so leaving it unread only wastes
+      // polling cycles without preserving any signal that isn't already on
+      // the comment itself via 😕.
       log("error", `Failed to send event or mark read: ${err.message}`);
+      ghAdapter.markThreadRead(notification.id);
       try {
-        releaseLock(notification, lock, ghAdapter);
-      } catch (releaseErr) {
-        log("error", `Failed to release lock: ${releaseErr.message}`);
+        addOutcomeReaction(notification, lock, ghAdapter, ERROR_REACTION);
+      } catch (reactErr) {
+        log("error", `Failed to add error reaction: ${reactErr.message}`);
       }
     }
   }
@@ -685,6 +817,7 @@ module.exports = {
   buildWarningMessage,
   acquireLock,
   releaseLock,
+  addOutcomeReaction,
   handlePrReviewCommentBatch,
 };
 

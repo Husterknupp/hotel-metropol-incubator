@@ -44,6 +44,20 @@ const WARN_SESSION_KEY =
 // lazily inside sendWarning (not as a module-level const) so tests can set
 // the env var per-case without needing to re-require the module.
 
+// Issue #7: our own execSync timeout used to be 300000ms (5min) — tighter
+// than the CLI's own agent-turn timeout (600s / 10min default, see
+// docs/cli/agent.md). That meant WE were the first thing to time out on a
+// normal but slow turn: execSync threw ETIMEDOUT, the caller released the
+// lock reaction and logged an error, while the turn kept running server-side
+// and finished successfully seconds later (first live case: PR #62 on
+// party-insights-shenanigans, 2026-07-23, execSync ETIMEDOUT at 5:00, turn
+// actually finished at 5:36). Raised past the CLI's own ceiling so our
+// wrapper is no longer the tighter timeout; callers use `err.code ===
+// "ETIMEDOUT"` to tell "we gave up waiting" (turn likely still running,
+// PENDING) apart from a genuine CLI failure (bad args, exhausted provider
+// quota — both observed to fail near-instantly, see issue #7 discussion).
+const AGENT_TURN_TIMEOUT_MS = 660000; // 11min
+
 function sendEvent(
   text,
   { deliver = true, sessionKey = MAIN_SESSION_KEY, replyChannel, replyTo } = {}
@@ -55,7 +69,7 @@ function sendEvent(
       : "";
   execSync(
     `openclaw agent --session-key ${sessionKey} --message "${text}"${deliverFlag}${replyFlags}`,
-    { encoding: "utf8", timeout: 300000 }
+    { encoding: "utf8", timeout: AGENT_TURN_TIMEOUT_MS }
   );
 }
 
