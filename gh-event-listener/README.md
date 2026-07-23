@@ -29,9 +29,14 @@ The fix, agreed in the issue #7 discussion:
 
 - The `execSync` timeout is now 11min — past the CLI's own 10min ceiling, so our wrapper is no longer the tighter one.
 - Once `sendEvent` returns (or throws), the wrapper distinguishes two cases by `err.code`:
-  - **No error, or a genuine CLI failure within 11min** (bad arguments, exhausted provider quota — both observed to fail near-instantly, never slowly): add `SUCCESS_REACTION` (🚀) on success, or `ERROR_REACTION` (😕) plus release the lock on failure, so the next poll retries.
+  - **No error, or a genuine CLI failure within 11min** (bad arguments, exhausted provider quota — both observed to fail near-instantly, never slowly): add `SUCCESS_REACTION` (🚀) on success, or `ERROR_REACTION` (😕) on failure.
   - **`ETIMEDOUT`** (our own 11min timeout fired): treat as "assume the turn is still running" — leave the 👀 lock untouched, do **not** add an error reaction, do **not** mark the thread read. There is no GitHub reaction for "pending" (the API only accepts `+1`, `-1`, `laugh`, `confused`, `heart`, `hooray`, `rocket`, `eyes`), so a bare 👀 with no outcome reaction *is* the pending state.
 - Outcome reactions are only ever **added**, never used to replace the lock — GitHub reactions of different `content` are independent, so 👀 and 🚀/😕 coexist. This avoids the "wrongly deleted reaction" risk that motivated raising the timeout in the first place.
+- **The lock is never released on a genuine failure** (PR #16 review). Genuine failures (bad arguments, exhausted provider quota, broken config) don't fix themselves — releasing the lock would let the very next poll re-acquire it and hit the same failure again, recreating the once-a-minute retry loop from 2026-07-20/21 that this whole feature exists to prevent. So a genuine failure leaves 👀+😕 stuck together on purpose, and needs a human to remove 👀 once the underlying cause is actually fixed.
+- **Expected error timing, so "genuine failure" isn't a guess:**
+  - Argument/config errors (the class that caused the 2026-07-20/21 loop) fail in well under 10 seconds — they die during CLI argument parsing, before any model call starts.
+  - `ETIMEDOUT` at 11min is treated as healthy-but-slow, not a failure — every `ETIMEDOUT` observed in production so far (38 cases) turned out to be a turn that later succeeded.
+  - Nothing has ever been observed failing genuinely in between (seconds to 11min) — including a slow "provider quota exhausted" failure. That's an open evidentiary gap (our old 5min timeout foreclosed ever observing that window), not a confirmed absence. If it does happen, it's currently treated as a genuine failure (😕, lock kept) — the safer default for an unobserved case.
 
 Configurable via `SUCCESS_REACTION` / `ERROR_REACTION` (see Configuration below).
 
@@ -133,7 +138,7 @@ Outcomes: `no_op` | `comment` | `issue` | `pr` | `pr_review_comment` | `pending`
 npm test
 ```
 
-Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, sticky `assign`/`review_requested` reason vs. genuine follow-up comment, issue-level vs. comment-level locking, the already-locked case, untrusted actor, self-triggered events, batched inline review comments (issue #8), and lock release on failure.
+Covers all four happy-path flows (comment, issue, PR, PR review comment), actor resolution from the GitHub API, sticky `assign`/`review_requested` reason vs. genuine follow-up comment, issue-level vs. comment-level locking, the already-locked case, untrusted actor, self-triggered events, batched inline review comments (issue #8), and outcome reactions on success/timeout/genuine failure (the lock is deliberately *not* released on a genuine failure — see "How outcome reactions work" above).
 
 ## Project structure
 

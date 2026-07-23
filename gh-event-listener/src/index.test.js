@@ -985,7 +985,12 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(msg).not.toContain("700");
   });
 
-  test("issue #8: sendEvent failure releases every lock so the batch retries", () => {
+  // Issue #16 review (Husterknupp): releasing the locks here would let the
+  // very next poll re-acquire them and hit the same non-transient failure
+  // again — the once-a-minute loop from 2026-07-20/21 (#7/#8) that this
+  // feature exists to prevent. Locks now stay in place; a human must clear
+  // 👀 once the underlying cause is fixed.
+  test("issue #16: sendEvent failure leaves every lock in place (does not retry) and marks every comment with the error reaction", () => {
     const inlineReviewNotif = makeNotification({
       reason: "author",
       subject: {
@@ -1000,12 +1005,10 @@ describe("run – PR review comment flow (happy path)", () => {
         { id: 111, user: { login: "Husterknupp" }, body: "a" },
         { id: 222, user: { login: "Husterknupp" }, body: "b" },
       ]),
-      // First reaction check (partition) empty; on release, our lock is present
       getPrReviewCommentReactions: jest
         .fn()
         .mockReturnValueOnce([]) // 111 partition
-        .mockReturnValueOnce([]) // 222 partition
-        .mockReturnValue([{ content: "eyes", id: 77 }]), // release lookups
+        .mockReturnValueOnce([]), // 222 partition
     });
     const oclAdapter = makeOclAdapter({
       sendEvent: jest.fn().mockImplementation(() => {
@@ -1015,13 +1018,12 @@ describe("run – PR review comment flow (happy path)", () => {
 
     run(ghAdapter, oclAdapter);
 
-    // Both locks released, thread NOT marked read (so the next poll retries)
-    const releasedIds = ghAdapter.removePrReviewCommentReaction.mock.calls.map(
-      (c) => c[0].commentId
-    );
-    expect(releasedIds).toEqual(expect.arrayContaining(["111", "222"]));
+    // Locks NOT released, thread NOT marked read — the notification is left
+    // visibly stuck rather than silently retried.
+    expect(ghAdapter.removePrReviewCommentReaction).not.toHaveBeenCalled();
     expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
-    // Issue #7: genuine failure also leaves a visible error marker per comment
+    // Genuine failure leaves a visible error marker per comment, on top of
+    // the still-in-place 👀 lock.
     expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
       expect.objectContaining({ commentId: "111", content: "confused" })
     );
@@ -1304,15 +1306,17 @@ describe("run – self-triggered event (our own bot)", () => {
 // ── run: OpenClaw sendEvent fails ────────────────────────────────────────────
 
 describe("run – OpenClaw sendEvent fails", () => {
-  test("releases lock on failure (issue comment)", () => {
+  // Issue #16 review (Husterknupp): a genuine failure does not fix itself on
+  // retry, so releasing the lock here would let the very next poll re-acquire
+  // it and hit the same failure again — the once-a-minute loop from
+  // 2026-07-20/21 that this feature exists to prevent. The lock must stay in
+  // place; only a human clearing 👀 should let the notification be reprocessed.
+  test("genuine failure does NOT release the lock (issue comment)", () => {
     const notif = makeNotification({ reason: "mention" });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
       getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
-      getReactions: jest
-        .fn()
-        .mockReturnValueOnce([]) // First call: no lock → acquire
-        .mockReturnValueOnce([{ content: "eyes", id: 42 }]), // Second call: release
+      getReactions: jest.fn().mockReturnValueOnce([]), // acquire only; no release lookup expected
     });
     const oclAdapter = makeOclAdapter({
       sendEvent: jest.fn().mockImplementation(() => {
@@ -1322,24 +1326,20 @@ describe("run – OpenClaw sendEvent fails", () => {
 
     run(ghAdapter, oclAdapter);
 
-    // Lock should be released (removeReaction called)
-    expect(ghAdapter.removeReaction).toHaveBeenCalledWith(
-      expect.objectContaining({ reactionId: 42 })
-    );
+    expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
   });
 
   // Issue #7: a genuine CLI failure (bad args, exhausted provider quota — both
   // observed to fail near-instantly) is not the same as our own execSync
-  // timeout firing. Only a genuine failure gets the error reaction + retry.
-  test("genuine (non-timeout) failure adds the error reaction (issue comment)", () => {
+  // timeout firing. It gets the error reaction, added on top of the
+  // still-in-place lock (issue #16 review — see test above for why the lock
+  // itself is not released).
+  test("genuine (non-timeout) failure adds the error reaction without releasing the lock (issue comment)", () => {
     const notif = makeNotification({ reason: "mention" });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
       getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
-      getReactions: jest
-        .fn()
-        .mockReturnValueOnce([]) // acquire
-        .mockReturnValueOnce([{ content: "eyes", id: 42 }]), // release
+      getReactions: jest.fn().mockReturnValueOnce([]), // acquire only
     });
     const err = new Error("Too many arguments for this command");
     err.status = 1; // genuine CLI exit, not a killed-by-timeout process
@@ -1354,9 +1354,7 @@ describe("run – OpenClaw sendEvent fails", () => {
     expect(ghAdapter.addReaction).toHaveBeenCalledWith(
       expect.objectContaining({ commentId: "99", content: "confused" })
     );
-    expect(ghAdapter.removeReaction).toHaveBeenCalledWith(
-      expect.objectContaining({ reactionId: 42 })
-    );
+    expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
   });
 
   // The core fix behind issue #7: our own execSync timeout (ETIMEDOUT) used to

@@ -590,6 +590,14 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
       return;
     }
     log("error", `Failed to send event or mark read: ${err.message}`);
+    // Issue #16 review: a genuine (non-ETIMEDOUT) failure — bad CLI args, an
+    // exhausted provider quota, a broken config — does not fix itself on
+    // retry. Releasing the lock here would let the next poll immediately
+    // re-acquire it and hit the same failure again, recreating the
+    // once-a-minute retry loop from 2026-07-20/21 (see #7/#8). So the lock
+    // stays in place alongside 😕: the batch is left visibly stuck rather
+    // than silently retried, and needs a human to clear 👀 once the
+    // underlying cause is fixed.
     for (const c of locked) {
       try {
         addOutcomeReaction(
@@ -600,27 +608,6 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
         );
       } catch (reactErr) {
         log("error", `Failed to add error reaction to ${c.id}: ${reactErr.message}`);
-      }
-    }
-    // Release every lock we set so the batch is retried on the next poll.
-    for (const c of locked) {
-      try {
-        const reactions = ghAdapter.getPrReviewCommentReactions({
-          owner,
-          repo,
-          commentId: String(c.id),
-        });
-        const ours = reactions.find((r) => r.content === LOCK_REACTION);
-        if (ours) {
-          ghAdapter.removePrReviewCommentReaction({
-            owner,
-            repo,
-            commentId: String(c.id),
-            reactionId: ours.id,
-          });
-        }
-      } catch (releaseErr) {
-        log("error", `Failed to release lock ${c.id}: ${releaseErr.message}`);
       }
     }
   }
@@ -742,23 +729,24 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     } catch (err) {
       // Issue #7: distinguish our own execSync timeout (ETIMEDOUT — the turn
       // is likely still running past the old, too-tight timeout) from a
-      // genuine CLI failure. Only the latter releases the lock for retry;
-      // a timed-out-but-probably-fine turn keeps its 👀 (pending) reaction
-      // instead of being wrongly marked as failed and re-dispatched.
+      // genuine CLI failure.
       if (err.code === "ETIMEDOUT") {
         log("pending", `sendEvent exceeded timeout, assuming turn is still running: ${err.message}`);
         continue;
       }
+      // Issue #16 review: a genuine failure (bad CLI args, exhausted provider
+      // quota, broken config) does not fix itself. Releasing the lock here
+      // would let the next poll immediately re-acquire it and hit the same
+      // failure again — the once-a-minute retry loop from 2026-07-20/21
+      // (#7/#8) that this whole effort exists to prevent. So on a genuine
+      // failure the lock is deliberately left in place alongside 😕: the
+      // notification is left visibly stuck, not silently retried, and needs
+      // a human to clear 👀 once the underlying cause is fixed.
       log("error", `Failed to send event or mark read: ${err.message}`);
       try {
         addOutcomeReaction(notification, lock, ghAdapter, ERROR_REACTION);
       } catch (reactErr) {
         log("error", `Failed to add error reaction: ${reactErr.message}`);
-      }
-      try {
-        releaseLock(notification, lock, ghAdapter);
-      } catch (releaseErr) {
-        log("error", `Failed to release lock: ${releaseErr.message}`);
       }
     }
   }
