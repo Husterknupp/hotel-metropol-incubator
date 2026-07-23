@@ -44,14 +44,23 @@ const LOCK_REACTION = process.env.LOCK_REACTION || "eyes";
 const WARN_CHANNEL = process.env.WARN_CHANNEL || null;
 // Issue #7: 👀 used to double as both "in progress" and "done" — no way to
 // tell a still-pending turn from a finished one, or a finished one from a
-// failed one. These two reactions are added ON TOP of 👀 once the outcome is
+// failed one. These reactions are added ON TOP of 👀 once the outcome is
 // known (reactions of different content are independent, so nothing needs to
 // be removed to add one — see addOutcomeReaction). GitHub's reactions API
 // only accepts +1, -1, laugh, confused, heart, hooray, rocket, eyes; there is
 // no hourglass/pending option, so the pending state stays represented by 👀
-// alone (already true today) rather than a fourth reaction.
+// alone rather than a dedicated reaction.
 const SUCCESS_REACTION = process.env.SUCCESS_REACTION || "rocket";
 const ERROR_REACTION = process.env.ERROR_REACTION || "confused";
+// Issue #6/#16 review: a bare 👀 with nothing added on top used to mean two
+// very different things — "our own ETIMEDOUT fired, turn is presumed still
+// healthy" and "the process died silently before ever reaching an outcome"
+// (e.g. crashed between acquireLock and sendEvent returning). Both looked
+// identical from the outside. Adding TIMEOUT_REACTION when ETIMEDOUT fires
+// distinguishes the two: 👀+👍 means "we know we hit our own timeout, this is
+// the expected slow-turn case"; a bare 👀 with no outcome reaction at all
+// past its poll cycle means something never even got that far.
+const TIMEOUT_REACTION = process.env.TIMEOUT_REACTION || "+1";
 
 const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
 
@@ -584,9 +593,24 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
     // timeout (see openclaw-adapter.js). Leave the 👀 locks in place (still
     // the most honest signal: "forwarded, answer pending") instead of
     // releasing them and retrying — a retry here would re-dispatch a turn
-    // that may already be in flight.
+    // that may already be in flight. Issue #6/#16 review: add TIMEOUT_REACTION
+    // (👍) on top so this state is distinguishable from a lock stuck since
+    // the very start (e.g. a process that died before ever reaching this
+    // catch block at all) — both used to look like a bare 👀.
     if (err.code === "ETIMEDOUT") {
       log("pending", `sendEvent exceeded timeout for batch, assuming turn is still running: ${err.message}`);
+      for (const c of locked) {
+        try {
+          addOutcomeReaction(
+            notification,
+            { commentId: String(c.id), lockType: "pr_review" },
+            ghAdapter,
+            TIMEOUT_REACTION
+          );
+        } catch (reactErr) {
+          log("error", `Failed to add timeout reaction to ${c.id}: ${reactErr.message}`);
+        }
+      }
       return;
     }
     log("error", `Failed to send event or mark read: ${err.message}`);
@@ -729,9 +753,17 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     } catch (err) {
       // Issue #7: distinguish our own execSync timeout (ETIMEDOUT — the turn
       // is likely still running past the old, too-tight timeout) from a
-      // genuine CLI failure.
+      // genuine CLI failure. Issue #6/#16 review: add TIMEOUT_REACTION (👍) on
+      // top of 👀 so this is distinguishable from a lock stuck since the very
+      // start (process died before ever reaching this catch block) — both
+      // used to look like a bare 👀 with nothing else.
       if (err.code === "ETIMEDOUT") {
         log("pending", `sendEvent exceeded timeout, assuming turn is still running: ${err.message}`);
+        try {
+          addOutcomeReaction(notification, lock, ghAdapter, TIMEOUT_REACTION);
+        } catch (reactErr) {
+          log("error", `Failed to add timeout reaction: ${reactErr.message}`);
+        }
         continue;
       }
       // Issue #16 review: a genuine failure (bad CLI args, exhausted provider

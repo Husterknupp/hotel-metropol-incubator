@@ -1032,7 +1032,7 @@ describe("run – PR review comment flow (happy path)", () => {
     );
   });
 
-  test("issue #7: ETIMEDOUT on the batch leaves every lock in place and does not retry", () => {
+  test("issue #6/#16: ETIMEDOUT on the batch leaves every lock in place, adds the timeout reaction, and does not retry", () => {
     const inlineReviewNotif = makeNotification({
       reason: "author",
       subject: {
@@ -1062,6 +1062,12 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(ghAdapter.removePrReviewCommentReaction).not.toHaveBeenCalled();
     expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalledWith(
       expect.objectContaining({ content: "confused" })
+    );
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "111", content: "+1" })
+    );
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "222", content: "+1" })
     );
     expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
   });
@@ -1363,7 +1369,12 @@ describe("run – OpenClaw sendEvent fails", () => {
   // #62 on party-insights-shenanigans, 2026-07-23 — the turn finished
   // successfully 36s after our wrapper gave up). ETIMEDOUT must now leave the
   // 👀 lock untouched (still-pending signal) instead of releasing it.
-  test("ETIMEDOUT (our own timeout, not a CLI failure) leaves the lock in place and does not mark an error", () => {
+  //
+  // Issue #6/#16 review: a bare 👀 used to mean two different things — "our
+  // own timeout fired, turn presumed healthy" and "process died silently
+  // before ever reaching this code at all". TIMEOUT_REACTION (👍) added on
+  // top of 👀 distinguishes the two.
+  test("ETIMEDOUT (our own timeout, not a CLI failure) leaves the lock in place, adds the timeout reaction, and does not mark an error", () => {
     const notif = makeNotification({ reason: "mention" });
     const ghAdapter = makeGhAdapter({
       getNotifications: jest.fn().mockReturnValue([notif]),
@@ -1383,6 +1394,9 @@ describe("run – OpenClaw sendEvent fails", () => {
 
     expect(ghAdapter.addReaction).toHaveBeenCalledWith(
       expect.objectContaining({ content: "eyes" })
+    );
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "99", content: "+1" })
     );
     expect(ghAdapter.addReaction).not.toHaveBeenCalledWith(
       expect.objectContaining({ content: "confused" })
