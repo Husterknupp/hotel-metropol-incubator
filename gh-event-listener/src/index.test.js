@@ -1018,10 +1018,13 @@ describe("run – PR review comment flow (happy path)", () => {
 
     run(ghAdapter, oclAdapter);
 
-    // Locks NOT released, thread NOT marked read — the notification is left
-    // visibly stuck rather than silently retried.
+    // Locks NOT released — the notification is left visibly stuck (👀+😕)
+    // rather than silently retried. Thread IS marked read (issue #16 review):
+    // the lock already blocks reprocessing, so leaving it unread would only
+    // cause repeated "already locked" no-op polls without preserving any
+    // signal that isn't already visible via the 😕 reaction on the comment.
     expect(ghAdapter.removePrReviewCommentReaction).not.toHaveBeenCalled();
-    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
     // Genuine failure leaves a visible error marker per comment, on top of
     // the still-in-place 👀 lock.
     expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
@@ -1069,7 +1072,10 @@ describe("run – PR review comment flow (happy path)", () => {
     expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
       expect.objectContaining({ commentId: "222", content: "+1" })
     );
-    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+    // Thread IS marked read (issue #16 review) — the lock already blocks
+    // reprocessing, so an unread thread would only produce repeated
+    // "already locked" no-op polls, not a preserved signal.
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
   });
 
   test("issue #7: success adds the success reaction on top of every lock in the batch", () => {
@@ -1361,6 +1367,10 @@ describe("run – OpenClaw sendEvent fails", () => {
       expect.objectContaining({ commentId: "99", content: "confused" })
     );
     expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
+    // Thread IS marked read (issue #16 review) — the lock already blocks
+    // reprocessing, so an unread thread would only cause repeated
+    // "already locked" no-op polls, not a preserved signal.
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
   });
 
   // The core fix behind issue #7: our own execSync timeout (ETIMEDOUT) used to
@@ -1402,7 +1412,10 @@ describe("run – OpenClaw sendEvent fails", () => {
       expect.objectContaining({ content: "confused" })
     );
     expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
-    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+    // Thread IS marked read (issue #16 review) — the lock already blocks
+    // reprocessing, so an unread thread would only cause repeated
+    // "already locked" no-op polls, not a preserved signal.
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
   });
 
   test("success adds the success reaction on top of the lock, without removing it (issue comment)", () => {

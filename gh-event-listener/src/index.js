@@ -597,8 +597,16 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
     // (👍) on top so this state is distinguishable from a lock stuck since
     // the very start (e.g. a process that died before ever reaching this
     // catch block at all) — both used to look like a bare 👀.
+    // Issue #16 review (Husterknupp): mark the thread read here too, in both
+    // branches below. The locks already prevent any further reprocessing —
+    // a later poll on an unread thread would just log "already locked" per
+    // comment and do nothing else, so leaving it unread only means repeated
+    // wasted GitHub API calls, not a preserved signal. The outcome reaction
+    // (👍/😕) already carries the visible signal, and it lives on the
+    // comments themselves, not on notification read-state.
     if (err.code === "ETIMEDOUT") {
       log("pending", `sendEvent exceeded timeout for batch, assuming turn is still running: ${err.message}`);
+      ghAdapter.markThreadRead(notification.id);
       for (const c of locked) {
         try {
           addOutcomeReaction(
@@ -614,6 +622,7 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
       return;
     }
     log("error", `Failed to send event or mark read: ${err.message}`);
+    ghAdapter.markThreadRead(notification.id);
     // Issue #16 review: a genuine (non-ETIMEDOUT) failure — bad CLI args, an
     // exhausted provider quota, a broken config — does not fix itself on
     // retry. Releasing the lock here would let the next poll immediately
@@ -757,8 +766,18 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
       // top of 👀 so this is distinguishable from a lock stuck since the very
       // start (process died before ever reaching this catch block) — both
       // used to look like a bare 👀 with nothing else.
+      //
+      // Issue #16 review (Husterknupp): mark the thread read here too. The
+      // lock already prevents any further reprocessing — a later poll on an
+      // unread thread would just log "already locked" and do nothing else,
+      // so leaving it unread only means repeated wasted GitHub API calls,
+      // not a preserved signal. The outcome reaction (👍/😕) already carries
+      // the visible signal, and it lives on the comment/issue itself, not on
+      // notification read-state — marking read doesn't hide it from anyone
+      // looking at the actual thread.
       if (err.code === "ETIMEDOUT") {
         log("pending", `sendEvent exceeded timeout, assuming turn is still running: ${err.message}`);
+        ghAdapter.markThreadRead(notification.id);
         try {
           addOutcomeReaction(notification, lock, ghAdapter, TIMEOUT_REACTION);
         } catch (reactErr) {
@@ -773,8 +792,13 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
       // (#7/#8) that this whole effort exists to prevent. So on a genuine
       // failure the lock is deliberately left in place alongside 😕: the
       // notification is left visibly stuck, not silently retried, and needs
-      // a human to clear 👀 once the underlying cause is fixed.
+      // a human to clear 👀 once the underlying cause is fixed. Thread is
+      // marked read for the same reason as the ETIMEDOUT case above — the
+      // lock already stops reprocessing, so leaving it unread only wastes
+      // polling cycles without preserving any signal that isn't already on
+      // the comment itself via 😕.
       log("error", `Failed to send event or mark read: ${err.message}`);
+      ghAdapter.markThreadRead(notification.id);
       try {
         addOutcomeReaction(notification, lock, ghAdapter, ERROR_REACTION);
       } catch (reactErr) {
