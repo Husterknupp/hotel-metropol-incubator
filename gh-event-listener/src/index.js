@@ -42,6 +42,16 @@ const TRUSTED_ACTOR = process.env.TRUSTED_ACTOR || "Husterknupp";
 const SELF_ACTOR = process.env.SELF_ACTOR || "arostovd";
 const LOCK_REACTION = process.env.LOCK_REACTION || "eyes";
 const WARN_CHANNEL = process.env.WARN_CHANNEL || null;
+// Issue #7: 👀 used to double as both "in progress" and "done" — no way to
+// tell a still-pending turn from a finished one, or a finished one from a
+// failed one. These two reactions are added ON TOP of 👀 once the outcome is
+// known (reactions of different content are independent, so nothing needs to
+// be removed to add one — see addOutcomeReaction). GitHub's reactions API
+// only accepts +1, -1, laugh, confused, heart, hooray, rocket, eyes; there is
+// no hourglass/pending option, so the pending state stays represented by 👀
+// alone (already true today) rather than a fourth reaction.
+const SUCCESS_REACTION = process.env.SUCCESS_REACTION || "rocket";
+const ERROR_REACTION = process.env.ERROR_REACTION || "confused";
 
 const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
 
@@ -414,6 +424,30 @@ function releaseLock(notification, lock, ghAdapter) {
 }
 
 /**
+ * Add an outcome reaction (SUCCESS_REACTION or ERROR_REACTION) to the same
+ * target the lock reaction sits on. Unlike releaseLock, this never removes
+ * anything — reactions of different `content` are independent on GitHub, so
+ * 👀 and the outcome reaction can coexist. Husterknupp specifically flagged
+ * the risk of a wrongly-deleted reaction (issue #7 discussion); leaving 👀 in
+ * place and only ever adding avoids that class of bug entirely.
+ * lock: {commentId, lockType} as returned by acquireLock (or a synthetic
+ * equivalent for batch-locked PR review comments).
+ */
+function addOutcomeReaction(notification, lock, ghAdapter, content) {
+  if (!lock) return;
+  const { owner, repo } = parseRepo(notification);
+  const { commentId, lockType } = lock;
+
+  if (lockType === "pr_review") {
+    ghAdapter.addPrReviewCommentReaction({ owner, repo, commentId, content });
+  } else if (lockType === "issue_subject") {
+    ghAdapter.addIssueReaction({ owner, repo, issueNumber: commentId, content });
+  } else {
+    ghAdapter.addReaction({ owner, repo, commentId, content });
+  }
+}
+
+/**
  * Handle a PR inline-review-comment notification as a BATCH.
  *
  * A submitted review bundles many inline comments under a single notification
@@ -530,9 +564,44 @@ function handlePrReviewCommentBatch(notification, ghAdapter, oclAdapter) {
   try {
     oclAdapter.sendEvent(message, { deliver: false });
     ghAdapter.markThreadRead(notification.id);
+    for (const c of locked) {
+      try {
+        addOutcomeReaction(
+          notification,
+          { commentId: String(c.id), lockType: "pr_review" },
+          ghAdapter,
+          SUCCESS_REACTION
+        );
+      } catch (reactErr) {
+        log("error", `Failed to add success reaction to ${c.id}: ${reactErr.message}`);
+      }
+    }
     log("pr_review_comment", message);
   } catch (err) {
+    // Issue #7: our own execSync timeout (ETIMEDOUT) firing is not the same
+    // as a genuine CLI failure — every ETIMEDOUT we've observed in practice
+    // turned out to be a healthy turn still running past our old, too-tight
+    // timeout (see openclaw-adapter.js). Leave the 👀 locks in place (still
+    // the most honest signal: "forwarded, answer pending") instead of
+    // releasing them and retrying — a retry here would re-dispatch a turn
+    // that may already be in flight.
+    if (err.code === "ETIMEDOUT") {
+      log("pending", `sendEvent exceeded timeout for batch, assuming turn is still running: ${err.message}`);
+      return;
+    }
     log("error", `Failed to send event or mark read: ${err.message}`);
+    for (const c of locked) {
+      try {
+        addOutcomeReaction(
+          notification,
+          { commentId: String(c.id), lockType: "pr_review" },
+          ghAdapter,
+          ERROR_REACTION
+        );
+      } catch (reactErr) {
+        log("error", `Failed to add error reaction to ${c.id}: ${reactErr.message}`);
+      }
+    }
     // Release every lock we set so the batch is retried on the next poll.
     for (const c of locked) {
       try {
@@ -664,9 +733,28 @@ function run(ghAdapter = gh, oclAdapter = openclaw) {
     try {
       oclAdapter.sendEvent(message, { deliver: false });
       ghAdapter.markThreadRead(notification.id);
+      try {
+        addOutcomeReaction(notification, lock, ghAdapter, SUCCESS_REACTION);
+      } catch (reactErr) {
+        log("error", `Failed to add success reaction: ${reactErr.message}`);
+      }
       log(kind, message);
     } catch (err) {
+      // Issue #7: distinguish our own execSync timeout (ETIMEDOUT — the turn
+      // is likely still running past the old, too-tight timeout) from a
+      // genuine CLI failure. Only the latter releases the lock for retry;
+      // a timed-out-but-probably-fine turn keeps its 👀 (pending) reaction
+      // instead of being wrongly marked as failed and re-dispatched.
+      if (err.code === "ETIMEDOUT") {
+        log("pending", `sendEvent exceeded timeout, assuming turn is still running: ${err.message}`);
+        continue;
+      }
       log("error", `Failed to send event or mark read: ${err.message}`);
+      try {
+        addOutcomeReaction(notification, lock, ghAdapter, ERROR_REACTION);
+      } catch (reactErr) {
+        log("error", `Failed to add error reaction: ${reactErr.message}`);
+      }
       try {
         releaseLock(notification, lock, ghAdapter);
       } catch (releaseErr) {
@@ -685,6 +773,7 @@ module.exports = {
   buildWarningMessage,
   acquireLock,
   releaseLock,
+  addOutcomeReaction,
   handlePrReviewCommentBatch,
 };
 

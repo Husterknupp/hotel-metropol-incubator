@@ -12,13 +12,28 @@ Designed to run as a cron job — no inbound HTTP traffic required.
 4. **Skips self-triggered events**: activity from our own bot account (`SELF_ACTOR`, default: `arostovd`) is ignored — no warning, no re-trigger — but the thread is still marked read, so replying on a PR can't feed the listener back into itself
 5. Checks the trusted actor filter (`TRUSTED_ACTOR`, default: `Husterknupp`)
 6. Sets an emoji reaction as a distributed lock to prevent duplicate processing — on the triggering comment when one exists, or on the issue/PR itself for a genuine assignment/review request (nothing to comment on yet)
-7. Sends an event to the OpenClaw agent via `openclaw agent --session-key <key> --message "<text>"` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window). Happy-path events instruct the agent to answer in full on GitHub and stay silent on Discord — enforced structurally by omitting `--deliver` for these calls, not by asking the model to end its turn with a silent token. Only warnings (untrusted actors) are sent with `--deliver`, and always on a separate, isolated session key (`OPENCLAW_WARN_SESSION_KEY`, default `agent:main:gh-warnings`) — never the main session (`agent:main:main`) that's doing PR/issue work. See "Why warnings run on an isolated session" below.
+7. Sends an event to the OpenClaw agent via `openclaw agent --session-key <key> --message "<text>"` (runs one agent turn synchronously via the Gateway, independent of the heartbeat/active-hours window, timeout 11min). Happy-path events instruct the agent to answer in full on GitHub and stay silent on Discord — enforced structurally by omitting `--deliver` for these calls, not by asking the model to end its turn with a silent token. Only warnings (untrusted actors) are sent with `--deliver`, and always on a separate, isolated session key (`OPENCLAW_WARN_SESSION_KEY`, default `agent:main:gh-warnings`) — never the main session (`agent:main:main`) that's doing PR/issue work. See "Why warnings run on an isolated session" below.
 8. Marks the notification thread as read
-9. On failure: removes the lock reaction so the next cron run retries naturally
+9. Adds an outcome reaction on top of the 👀 lock (never removing it): 🚀 on success, 😕 on a genuine failure. See "How outcome reactions work" below.
+10. On genuine failure: removes the lock reaction so the next cron run retries naturally. On our own timeout (the agent turn likely still running), the lock is left untouched instead — see below.
 
 > **Note:** `reason=assign`/`review_requested` is a *sticky* GitHub notification reason — once assigned, every later activity on the thread (including plain follow-up comments) keeps arriving with that same reason. The listener tells a genuine assignment apart from a follow-up comment by comparing `subject.latest_comment_url` against `subject.url`: identical → genuine assignment (lock on the issue/PR); different → it's actually a comment (lock on that comment, resolve the actor from it).
 
 > **Batched reviews (inline comments):** a submitted PR review bundles several inline comments under a single notification. For the inline case (`author` + `PullRequest` + `latest_comment_url=null`) the listener fetches **all** review comments (`/pulls/{n}/comments`), filters them per author (skip our own, skip already-locked, warn and lock on strangers, collect the trusted ones), locks every trusted comment, and sends **one** event that lists them all — marking the thread read only once the whole batch is dispatched. This prevents dropping every comment but the newest, and locking untrusted comments too means the same stranger comment isn't re-warned every time the thread resurfaces.
+
+### How outcome reactions work
+
+**Background (issue #7):** the 👀 lock used to double as both "in progress" and "done", so there was no way to tell a still-pending event from a finished one, or a finished one from a silently failed one — and our own `execSync` timeout (5min) used to be *shorter* than the CLI's own agent-turn timeout (600s/10min default), so a healthy but slow turn regularly got its lock wrongly released and logged as an error while the turn kept running server-side and finished successfully seconds later (first live case: PR #62 on `party-insights-shenanigans`, 2026-07-23).
+
+The fix, agreed in the issue #7 discussion:
+
+- The `execSync` timeout is now 11min — past the CLI's own 10min ceiling, so our wrapper is no longer the tighter one.
+- Once `sendEvent` returns (or throws), the wrapper distinguishes two cases by `err.code`:
+  - **No error, or a genuine CLI failure within 11min** (bad arguments, exhausted provider quota — both observed to fail near-instantly, never slowly): add `SUCCESS_REACTION` (🚀) on success, or `ERROR_REACTION` (😕) plus release the lock on failure, so the next poll retries.
+  - **`ETIMEDOUT`** (our own 11min timeout fired): treat as "assume the turn is still running" — leave the 👀 lock untouched, do **not** add an error reaction, do **not** mark the thread read. There is no GitHub reaction for "pending" (the API only accepts `+1`, `-1`, `laugh`, `confused`, `heart`, `hooray`, `rocket`, `eyes`), so a bare 👀 with no outcome reaction *is* the pending state.
+- Outcome reactions are only ever **added**, never used to replace the lock — GitHub reactions of different `content` are independent, so 👀 and 🚀/😕 coexist. This avoids the "wrongly deleted reaction" risk that motivated raising the timeout in the first place.
+
+Configurable via `SUCCESS_REACTION` / `ERROR_REACTION` (see Configuration below).
 
 ### Why warnings run on an isolated session
 
@@ -89,7 +104,9 @@ tail -f logs/gh-event-listener.log            # watch for output within 60s
 |---|---|---|
 | `TRUSTED_ACTOR` | `Husterknupp` | GitHub username whose events trigger the agent |
 | `SELF_ACTOR` | `arostovd` | Our own bot account. Its own comments/reactions are ignored so the listener can't loop on its own replies |
-| `LOCK_REACTION` | `eyes` | Emoji reaction used as distributed lock |
+| `LOCK_REACTION` | `eyes` | Emoji reaction used as distributed lock (also the "forwarded/pending" signal — see "How outcome reactions work") |
+| `SUCCESS_REACTION` | `rocket` | Emoji reaction added on top of the lock once an event is dispatched and the notification thread is marked read |
+| `ERROR_REACTION` | `confused` | Emoji reaction added on top of the lock when `sendEvent` throws a genuine (non-timeout) error |
 | `WARN_CHANNEL` | _(not set)_ | Discord channel ID for untrusted-actor warnings. If not set, the agent uses its default channel. |
 | `OPENCLAW_WARN_SESSION_KEY` | `agent:main:gh-warnings` | Session key for untrusted-actor warnings — kept separate from `OPENCLAW_SESSION_KEY` so warnings never inherit an ongoing task's context (see "Why warnings run on an isolated session" above) |
 | `OPENCLAW_WARN_REPLY_CHANNEL` | `discord` | Delivery channel for the isolated warning session. Required because that session has no channel binding of its own — see "Why warnings need an explicit reply target" below |
@@ -106,7 +123,9 @@ Each run logs a single JSON line to stdout:
 {"ts":"2026-04-08T20:02:00.000Z","outcome":"error","detail":"gh CLI error (api): ..."}
 ```
 
-Outcomes: `no_op` | `comment` | `issue` | `pr` | `pr_review_comment` | `error`
+Outcomes: `no_op` | `comment` | `issue` | `pr` | `pr_review_comment` | `pending` | `error`
+
+`pending` means `sendEvent` hit our own 11min timeout (`ETIMEDOUT`) — the agent turn is assumed to still be running; see "How outcome reactions work" above.
 
 ## Tests
 

@@ -852,14 +852,15 @@ describe("run – PR review comment flow (happy path)", () => {
     run(ghAdapter, oclAdapter);
 
     // All four trusted comments get locked — our own reply does NOT
-    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
-      (c) => c[0].commentId
-    );
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls
+      .filter((c) => c[0].content === "eyes")
+      .map((c) => c[0].commentId);
     expect(lockedIds).toEqual(
       expect.arrayContaining(["3582979691", "3583055321", "3583072147", "3583107478"])
     );
     expect(lockedIds).not.toContain("3585505524");
-    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledTimes(4);
+    // 4 locks + 4 success reactions (issue #7) once the batch dispatch succeeds
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledTimes(8);
 
     // Exactly ONE agent event that names all four comments
     expect(oclAdapter.sendEvent).toHaveBeenCalledTimes(1);
@@ -897,9 +898,9 @@ describe("run – PR review comment flow (happy path)", () => {
     run(ghAdapter, oclAdapter);
 
     // Only the un-handled comment 222 gets locked and processed
-    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
-      (c) => c[0].commentId
-    );
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls
+      .filter((c) => c[0].content === "eyes")
+      .map((c) => c[0].commentId);
     expect(lockedIds).toEqual(["222"]);
     const msg = oclAdapter.sendEvent.mock.calls[0][0];
     expect(msg).toMatch(/React to 1 review comment/);
@@ -935,9 +936,9 @@ describe("run – PR review comment flow (happy path)", () => {
     );
     // Both the trusted comment AND the stranger's comment get locked, so the
     // stranger is never warned about twice when the thread resurfaces.
-    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
-      (c) => c[0].commentId
-    );
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls
+      .filter((c) => c[0].content === "eyes")
+      .map((c) => c[0].commentId);
     expect(lockedIds).toEqual(expect.arrayContaining(["111", "999"]));
     expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
       expect.objectContaining({ commentId: "999", content: "eyes" })
@@ -974,9 +975,9 @@ describe("run – PR review comment flow (happy path)", () => {
 
     run(ghAdapter, oclAdapter);
 
-    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls.map(
-      (c) => c[0].commentId
-    );
+    const lockedIds = ghAdapter.addPrReviewCommentReaction.mock.calls
+      .filter((c) => c[0].content === "eyes")
+      .map((c) => c[0].commentId);
     expect(lockedIds).toEqual(["800"]);
     const msg = oclAdapter.sendEvent.mock.calls[0][0];
     expect(msg).toMatch(/React to 1 review comment/);
@@ -1020,6 +1021,79 @@ describe("run – PR review comment flow (happy path)", () => {
     );
     expect(releasedIds).toEqual(expect.arrayContaining(["111", "222"]));
     expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+    // Issue #7: genuine failure also leaves a visible error marker per comment
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "111", content: "confused" })
+    );
+    expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "222", content: "confused" })
+    );
+  });
+
+  test("issue #7: ETIMEDOUT on the batch leaves every lock in place and does not retry", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 111, user: { login: "Husterknupp" }, body: "a" },
+        { id: 222, user: { login: "Husterknupp" }, body: "b" },
+      ]),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const err = new Error("Command timed out");
+    err.code = "ETIMEDOUT";
+    const oclAdapter = makeOclAdapter({
+      sendEvent: jest.fn().mockImplementation(() => {
+        throw err;
+      }),
+    });
+
+    run(ghAdapter, oclAdapter);
+
+    expect(ghAdapter.removePrReviewCommentReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.addPrReviewCommentReaction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ content: "confused" })
+    );
+    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+  });
+
+  test("issue #7: success adds the success reaction on top of every lock in the batch", () => {
+    const inlineReviewNotif = makeNotification({
+      reason: "author",
+      subject: {
+        type: "PullRequest",
+        url: "https://api.github.com/repos/Husterknupp/hotel-metropol-incubator/pulls/3",
+        latest_comment_url: null,
+      },
+    });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([inlineReviewNotif]),
+      getPrReviewComments: jest.fn().mockReturnValue([
+        { id: 111, user: { login: "Husterknupp" }, body: "a" },
+        { id: 222, user: { login: "Husterknupp" }, body: "b" },
+      ]),
+      getPrReviewCommentReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    for (const id of ["111", "222"]) {
+      expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+        expect.objectContaining({ commentId: id, content: "eyes" })
+      );
+      expect(ghAdapter.addPrReviewCommentReaction).toHaveBeenCalledWith(
+        expect.objectContaining({ commentId: id, content: "rocket" })
+      );
+    }
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(inlineReviewNotif.id);
   });
 });
 
@@ -1252,5 +1326,91 @@ describe("run – OpenClaw sendEvent fails", () => {
     expect(ghAdapter.removeReaction).toHaveBeenCalledWith(
       expect.objectContaining({ reactionId: 42 })
     );
+  });
+
+  // Issue #7: a genuine CLI failure (bad args, exhausted provider quota — both
+  // observed to fail near-instantly) is not the same as our own execSync
+  // timeout firing. Only a genuine failure gets the error reaction + retry.
+  test("genuine (non-timeout) failure adds the error reaction (issue comment)", () => {
+    const notif = makeNotification({ reason: "mention" });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+      getReactions: jest
+        .fn()
+        .mockReturnValueOnce([]) // acquire
+        .mockReturnValueOnce([{ content: "eyes", id: 42 }]), // release
+    });
+    const err = new Error("Too many arguments for this command");
+    err.status = 1; // genuine CLI exit, not a killed-by-timeout process
+    const oclAdapter = makeOclAdapter({
+      sendEvent: jest.fn().mockImplementation(() => {
+        throw err;
+      }),
+    });
+
+    run(ghAdapter, oclAdapter);
+
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "99", content: "confused" })
+    );
+    expect(ghAdapter.removeReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ reactionId: 42 })
+    );
+  });
+
+  // The core fix behind issue #7: our own execSync timeout (ETIMEDOUT) used to
+  // be shorter than the CLI's own agent-turn timeout, so a healthy but slow
+  // turn got its lock wrongly released and logged as an error (live case: PR
+  // #62 on party-insights-shenanigans, 2026-07-23 — the turn finished
+  // successfully 36s after our wrapper gave up). ETIMEDOUT must now leave the
+  // 👀 lock untouched (still-pending signal) instead of releasing it.
+  test("ETIMEDOUT (our own timeout, not a CLI failure) leaves the lock in place and does not mark an error", () => {
+    const notif = makeNotification({ reason: "mention" });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+      getReactions: jest.fn().mockReturnValue([]), // acquire only, lock stays
+    });
+    const err = new Error("Command timed out");
+    err.code = "ETIMEDOUT";
+    err.signal = "SIGTERM";
+    const oclAdapter = makeOclAdapter({
+      sendEvent: jest.fn().mockImplementation(() => {
+        throw err;
+      }),
+    });
+
+    run(ghAdapter, oclAdapter);
+
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "eyes" })
+    );
+    expect(ghAdapter.addReaction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ content: "confused" })
+    );
+    expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).not.toHaveBeenCalled();
+  });
+
+  test("success adds the success reaction on top of the lock, without removing it (issue comment)", () => {
+    const notif = makeNotification({ reason: "mention" });
+    const ghAdapter = makeGhAdapter({
+      getNotifications: jest.fn().mockReturnValue([notif]),
+      getActorFromUrl: jest.fn().mockReturnValue("Husterknupp"),
+      getReactions: jest.fn().mockReturnValue([]),
+    });
+    const oclAdapter = makeOclAdapter();
+
+    run(ghAdapter, oclAdapter);
+
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "99", content: "eyes" })
+    );
+    expect(ghAdapter.addReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ commentId: "99", content: "rocket" })
+    );
+    expect(ghAdapter.removeReaction).not.toHaveBeenCalled();
+    expect(ghAdapter.markThreadRead).toHaveBeenCalledWith(notif.id);
   });
 });
